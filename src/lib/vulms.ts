@@ -33,46 +33,58 @@ const BROWSER_ARGS = [
   '--disable-dev-shm-usage',
   '--disable-gpu',
   '--window-size=1280,720',
-  // Make Puppeteer look more human-like
   '--disable-blink-features=AutomationControlled',
 ];
 
-function addStealthScripts(page: puppeteer.Page) {
-  // Remove webdriver detection
-  page.evaluateOnNewDocument(() => {
-    Object.defineProperty(navigator, 'webdriver', { get: () => false });
-    // Override plugins to look real
-    Object.defineProperty(navigator, 'plugins', {
-      get: () => [1, 2, 3, 4, 5],
-    });
-    // Override languages
-    Object.defineProperty(navigator, 'languages', {
-      get: () => ['en-US', 'en', 'ur'],
-    });
-    // Override chrome property
-    (window as Record<string, unknown>).chrome = { runtime: {} };
-    // Override permissions
-    const originalQuery = window.navigator.permissions.query;
-    (window.navigator.permissions as Record<string, unknown>).query = (parameters: Record<string, unknown>) =>
-      (parameters.name === 'notifications'
-        ? Promise.resolve({ state: Notification.permission })
-        : originalQuery(parameters));
-  });
-}
+// Check if running on Vercel serverless
+const isVercel = process.env.VERCEL === '1';
 
-export async function loginToVULMS(studentId: string, password: string) {
-  const browser = await puppeteer.launch({
+async function launchBrowser() {
+  if (isVercel) {
+    // On Vercel, use @sparticuz/chromium
+    try {
+      const chromium = await import('@sparticuz/chromium');
+      const browser = await puppeteer.launch({
+        args: chromium.default.args,
+        defaultViewport: chromium.default.defaultViewport,
+        executablePath: await chromium.default.executablePath(),
+        headless: chromium.default.headless,
+        ignoreHTTPSErrors: true,
+      });
+      return browser;
+    } catch {
+      console.warn('@sparticuz/chromium not found, falling back to default Puppeteer');
+    }
+  }
+
+  // Local development - use regular Puppeteer
+  return puppeteer.launch({
     headless: true,
     args: BROWSER_ARGS,
   });
+}
 
+function addStealthScripts(page: puppeteer.Page) {
+  page.evaluateOnNewDocument(() => {
+    Object.defineProperty(navigator, 'webdriver', { get: () => false });
+    Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+    Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en', 'ur'] });
+    (window as Record<string, unknown>).chrome = { runtime: {} };
+  });
+}
+
+function randomDelay(min: number, max: number): Promise<void> {
+  const delay = min + Math.random() * (max - min);
+  return new Promise((resolve) => setTimeout(resolve, delay));
+}
+
+export async function loginToVULMS(studentId: string, password: string) {
+  const browser = await launchBrowser();
   const page = await browser.newPage();
   addStealthScripts(page);
 
   try {
     await page.setViewport({ width: 1280, height: 720 });
-
-    // Set a realistic user agent
     await page.setUserAgent(
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
     );
@@ -83,23 +95,21 @@ export async function loginToVULMS(studentId: string, password: string) {
     // Wait for login form — ASP.NET WebForms selectors
     await page.waitForSelector('#txtStudentID', { timeout: 15000 });
 
-    // Small random delays to look human
     await randomDelay(500, 1500);
 
-    // Clear and type Student ID
+    // Fill Student ID
     await page.click('#txtStudentID', { clickCount: 3 });
     await page.type('#txtStudentID', studentId, { delay: 40 + Math.random() * 60 });
 
     await randomDelay(300, 800);
 
-    // Clear and type Password
+    // Fill Password
     await page.click('#txtPassword', { clickCount: 3 });
     await page.type('#txtPassword', password, { delay: 40 + Math.random() * 60 });
 
     await randomDelay(500, 1200);
 
-    // Wait for reCAPTCHA v3 to auto-solve (it runs in background)
-    // reCAPTCHA v3 invisible fills the g-recaptcha-response field automatically
+    // Wait for reCAPTCHA v3
     await page.waitForFunction(
       () => {
         const recaptchaField = document.querySelector('#g-recaptcha-response') as HTMLTextAreaElement;
@@ -107,18 +117,16 @@ export async function loginToVULMS(studentId: string, password: string) {
       },
       { timeout: 15000 }
     ).catch(() => {
-      // reCAPTCHA might not load — try anyway
       console.log('reCAPTCHA token not found, proceeding without it');
     });
 
     await randomDelay(500, 1000);
 
-    // Click Sign In button
+    // Click Sign In
     await Promise.all([
       page.click('#ibtnLogin'),
       page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 }),
     ]).catch(async () => {
-      // If navigation doesn't happen, try submitting form via JS
       await page.evaluate(() => {
         const form = document.querySelector('#ctl00') as HTMLFormElement;
         if (form) form.submit();
@@ -126,33 +134,25 @@ export async function loginToVULMS(studentId: string, password: string) {
       await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 }).catch(() => {});
     });
 
-    // Check if login was successful — look for dashboard indicators
-    const currentUrl = page.url();
-    const pageContent = await page.evaluate(() => document.body.innerText);
+    // Check login success
+    const loginFormVisible = await page.evaluate(() => {
+      const usernameField = document.querySelector('#txtStudentID') as HTMLInputElement;
+      return usernameField && usernameField.offsetParent !== null;
+    });
 
-    // If still on login page, check for error
-    if (currentUrl === VULMS_LOGIN || currentUrl.endsWith('/')) {
+    if (loginFormVisible) {
       const errorMsg = await page.evaluate(() => {
-        const errEl = document.querySelector('.alert-danger, .error, .login-error, .m-alert, .validation-summary-errors');
+        const errEl = document.querySelector('.alert-danger, .error, .login-error, .m-alert');
         return errEl ? errEl.textContent?.trim() : '';
       });
-
-      // Check if login form is still visible
-      const loginFormVisible = await page.evaluate(() => {
-        const usernameField = document.querySelector('#txtStudentID') as HTMLInputElement;
-        return usernameField && usernameField.offsetParent !== null;
-      });
-
-      if (loginFormVisible) {
-        await browser.close();
-        throw new Error(errorMsg || 'Login failed. Please check your Student ID and Password. Make sure your VULMS account is active.');
-      }
+      await browser.close();
+      throw new Error(errorMsg || 'Login failed. Please check your Student ID and Password.');
     }
 
-    // Login successful — get cookies
+    // Get cookies
     const cookies = await page.cookies();
 
-    // Get subjects from dashboard
+    // Get subjects
     const subjects = await scrapeSubjects(page);
 
     return { success: true, cookies, subjects, browser };
@@ -164,17 +164,13 @@ export async function loginToVULMS(studentId: string, password: string) {
 
 async function scrapeSubjects(page: puppeteer.Page): Promise<SubjectInfo[]> {
   try {
-    // VULMS dashboard shows enrolled courses/subjects
-    // Wait for dashboard content to load
     await randomDelay(1000, 2000);
 
-    // Try multiple selectors for course list on VULMS dashboard
     const subjects = await page.evaluate(() => {
       const results: Array<{ name: string; code: string; url: string }> = [];
 
-      // Strategy 1: Look for course links in dashboard
       const courseLinks = document.querySelectorAll(
-        'a[href*="CourseHome"], a[href*="coursehome"], a[href*="StudentHome"], a[href*="studenthome"], ' +
+        'a[href*="CourseHome"], a[href*="coursehome"], a[href*="StudentHome"], ' +
         '.m-portlet a[href*="Home"], .course-card a, .subject-card a, ' +
         'a[href*="Home.aspx"], a[href*="home.aspx"]'
       );
@@ -183,19 +179,14 @@ async function scrapeSubjects(page: puppeteer.Page): Promise<SubjectInfo[]> {
         const link = el as HTMLAnchorElement;
         const text = link.textContent?.trim() || '';
         const href = link.getAttribute('href') || '';
-        if (text && href) {
-          results.push({ name: text, code: '', url: href });
-        }
+        if (text && href) results.push({ name: text, code: '', url: href });
       });
 
-      // Strategy 2: Look for any subject/course listing
       if (results.length === 0) {
-        const allLinks = document.querySelectorAll('a[href]');
-        allLinks.forEach((el) => {
+        document.querySelectorAll('a[href]').forEach((el) => {
           const link = el as HTMLAnchorElement;
           const text = link.textContent?.trim() || '';
           const href = link.getAttribute('href') || '';
-          // Look for typical VU subject patterns (e.g., CS101, MTH301, etc.)
           const codeMatch = text.match(/([A-Z]{2,4}\d{3})/i);
           if (codeMatch && href && !href.includes('javascript') && !href.includes('#')) {
             results.push({
@@ -207,27 +198,6 @@ async function scrapeSubjects(page: puppeteer.Page): Promise<SubjectInfo[]> {
         });
       }
 
-      // Strategy 3: Look for table/list rows with course info
-      if (results.length === 0) {
-        const rows = document.querySelectorAll('table tr, .m-widget4__item, .list-group-item');
-        rows.forEach((row) => {
-          const link = row.querySelector('a[href]');
-          if (link) {
-            const text = link.textContent?.trim() || '';
-            const href = link.getAttribute('href') || '';
-            const codeMatch = text.match(/([A-Z]{2,4}\d{3})/i);
-            if (text && href && !href.includes('javascript')) {
-              results.push({
-                name: text,
-                code: codeMatch ? codeMatch[1].toUpperCase() : text.split(' ')[0],
-                url: href.startsWith('http') ? href : new URL(href, window.location.origin).href,
-              });
-            }
-          }
-        });
-      }
-
-      // Deduplicate
       const seen = new Set<string>();
       return results.filter((r) => {
         const key = r.code || r.name;
@@ -237,7 +207,6 @@ async function scrapeSubjects(page: puppeteer.Page): Promise<SubjectInfo[]> {
       });
     });
 
-    // Parse subject codes from names if not already set
     return subjects.map((s) => {
       if (!s.code) {
         const codeMatch = s.name.match(/^([A-Z]{2,4}\d{3})/i);
@@ -250,18 +219,12 @@ async function scrapeSubjects(page: puppeteer.Page): Promise<SubjectInfo[]> {
   }
 }
 
-export async function getSubjects(
-  cookies: VULMSCookie[],
-  existingBrowser?: puppeteer.Browser
-) {
+export async function getSubjects(cookies: VULMSCookie[], existingBrowser?: puppeteer.Browser) {
   let browser = existingBrowser;
   let ownBrowser = false;
 
   if (!browser) {
-    browser = await puppeteer.launch({
-      headless: true,
-      args: BROWSER_ARGS,
-    });
+    browser = await launchBrowser();
     ownBrowser = true;
   }
 
@@ -270,103 +233,49 @@ export async function getSubjects(
   await page.setCookie(...cookies);
 
   try {
-    // Navigate to VULMS dashboard
-    await page.goto(`${VULMS_BASE}/LMS/LMS_LandingPage.aspx`, {
-      waitUntil: 'networkidle2',
-      timeout: 30000,
-    });
-
+    await page.goto(`${VULMS_BASE}/LMS/LMS_LandingPage.aspx`, { waitUntil: 'networkidle2', timeout: 30000 });
     const subjects = await scrapeSubjects(page);
     return subjects;
   } finally {
     await page.close();
-    if (ownBrowser && browser) {
-      await browser.close();
-    }
+    if (ownBrowser && browser) await browser.close();
   }
 }
 
-export async function getHandouts(
-  cookies: VULMSCookie[],
-  courseUrl: string
-) {
-  const browser = await puppeteer.launch({
-    headless: true,
-    args: BROWSER_ARGS,
-  });
+export async function getHandouts(cookies: VULMSCookie[], courseUrl: string) {
+  const browser = await launchBrowser();
   const page = await browser.newPage();
   addStealthScripts(page);
   await page.setCookie(...cookies);
 
   try {
-    // Navigate to the course page
-    await page.goto(courseUrl, {
-      waitUntil: 'networkidle2',
-      timeout: 30000,
-    });
-
+    await page.goto(courseUrl, { waitUntil: 'networkidle2', timeout: 30000 });
     await randomDelay(1000, 2000);
 
-    // Scrape handout/lecture links from the course page
     const handouts = await page.evaluate(() => {
       const results: Array<{ name: string; url: string; type: string }> = [];
-
-      // Look for handout/lecture/resource links
       const selectors = [
-        'a[href*="Handout"]', 'a[href*="handout"]',
-        'a[href*="Lecture"]', 'a[href*="lecture"]',
-        'a[href*="Content"]', 'a[href*="content"]',
-        'a[href*="Resource"]', 'a[href*="resource"]',
-        'a[href*="Download"]', 'a[href*="download"]',
-        'a[href*=".pdf"]', 'a[href*=".pptx"]', 'a[href*=".ppt"]',
-        'a[href*="Lesson"]', 'a[href*="lesson"]',
-        '.handout-link', '.lecture-link', '.resource-link',
+        'a[href*="Handout"]', 'a[href*="handout"]', 'a[href*="Lecture"]', 'a[href*="lecture"]',
+        'a[href*="Content"]', 'a[href*="Resource"]', 'a[href*="Download"]', 'a[href*=".pdf"]',
+        'a[href*=".pptx"]', 'a[href*="Lesson"]',
       ];
 
       selectors.forEach((sel) => {
-        const links = document.querySelectorAll(sel);
-        links.forEach((el) => {
+        document.querySelectorAll(sel).forEach((el) => {
           const link = el as HTMLAnchorElement;
           const text = link.textContent?.trim() || '';
           const href = link.getAttribute('href') || '';
           if (text && href && !href.includes('javascript')) {
             const fullUrl = href.startsWith('http') ? href : new URL(href, window.location.origin).href;
             const type = href.toLowerCase().includes('.pdf') ? 'pdf' :
-                         href.toLowerCase().includes('.pptx') || href.toLowerCase().includes('.ppt') ? 'pptx' :
-                         href.toLowerCase().includes('.doc') ? 'doc' : 'document';
+                         href.toLowerCase().includes('.pptx') || href.toLowerCase().includes('.ppt') ? 'pptx' : 'document';
             results.push({ name: text, url: fullUrl, type });
           }
         });
       });
 
-      // Also try finding all links in content areas
-      if (results.length === 0) {
-        const contentAreas = document.querySelectorAll(
-          '#region-main, .course-content, .m-portlet__body, .tab-content, .content-area, main'
-        );
-        contentAreas.forEach((area) => {
-          const links = area.querySelectorAll('a[href]');
-          links.forEach((el) => {
-            const link = el as HTMLAnchorElement;
-            const text = link.textContent?.trim() || '';
-            const href = link.getAttribute('href') || '';
-            if (text && href && !href.includes('javascript') && !href.includes('#') &&
-                (href.includes('.pdf') || href.includes('.ppt') || href.includes('Handout') ||
-                 href.includes('Lecture') || href.includes('Download') || href.includes('Content'))) {
-              const fullUrl = href.startsWith('http') ? href : new URL(href, window.location.origin).href;
-              results.push({ name: text, url: fullUrl, type: 'document' });
-            }
-          });
-        });
-      }
-
-      // Deduplicate by URL
       const seen = new Set<string>();
-      return results.filter((r) => {
-        if (seen.has(r.url)) return false;
-        seen.add(r.url);
-        return true;
-      });
+      return results.filter((r) => { if (seen.has(r.url)) return false; seen.add(r.url); return true; });
     });
 
     return handouts;
@@ -375,45 +284,24 @@ export async function getHandouts(
   }
 }
 
-export async function downloadHandoutContent(
-  cookies: VULMSCookie[],
-  handoutUrl: string
-) {
-  const browser = await puppeteer.launch({
-    headless: true,
-    args: BROWSER_ARGS,
-  });
+export async function downloadHandoutContent(cookies: VULMSCookie[], handoutUrl: string) {
+  const browser = await launchBrowser();
   const page = await browser.newPage();
   addStealthScripts(page);
   await page.setCookie(...cookies);
 
   try {
-    await page.goto(handoutUrl, {
-      waitUntil: 'networkidle2',
-      timeout: 30000,
-    });
-
-    // Extract text content from the page
+    await page.goto(handoutUrl, { waitUntil: 'networkidle2', timeout: 30000 });
     const content = await page.evaluate(() => {
-      // Try to get main content area first
       const mainContent =
         document.querySelector('#region-main') ||
-        document.querySelector('.course-content') ||
         document.querySelector('.m-portlet__body') ||
         document.querySelector('main') ||
-        document.querySelector('.content-area') ||
         document.body;
       return mainContent?.innerText || '';
     });
-
     return content;
   } finally {
     await browser.close();
   }
-}
-
-// Helper: random delay to look more human
-function randomDelay(min: number, max: number): Promise<void> {
-  const delay = min + Math.random() * (max - min);
-  return new Promise((resolve) => setTimeout(resolve, delay));
 }
