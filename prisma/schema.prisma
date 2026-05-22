@@ -1,0 +1,47 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model StudySession {
+  id        String    @id @default(cuid())
+  studentId String
+  cookies   String
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  subjects  Subject[]
+}
+
+model Subject {
+  id          String   @id @default(cuid())
+  sessionId   String
+  name        String
+  code        String
+  handouts    String
+  createdAt   DateTime @default(now())
+  studySession StudySession @relation(fields: [sessionId], references: [id])
+  handoutContents HandoutContent[]
+  chatMessages    ChatMessage[]
+}
+
+model HandoutContent {
+  id        String   @id @default(cuid())
+  subjectId String
+  title     String
+  content   String
+  createdAt DateTime @default(now())
+  subject   Subject  @relation(fields: [subjectId], references: [id])
+}
+
+model ChatMessage {
+  id        String   @id @default(cuid())
+  subjectId String
+  role      String
+  content   String
+  createdAt DateTime @default(now())
+  subject   Subject  @relation(fields: [subjectId], references: [id])
+}
