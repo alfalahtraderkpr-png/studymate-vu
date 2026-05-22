@@ -1,4 +1,4 @@
-# StudyMate VU - Dockerfile for Railway/Render deployment
+# StudyMate VU - Dockerfile for Railway deployment
 # Includes Chromium for Puppeteer-based VULMS login
 
 FROM node:20-slim
@@ -26,14 +26,17 @@ WORKDIR /app
 # Copy package files
 COPY package*.json ./
 
-# Install dependencies
-RUN npm ci --omit=dev
+# Install ALL dependencies (including dev) for build
+RUN npm ci
 
 # Copy source code
 COPY . .
 
 # Build Next.js
 RUN npm run build
+
+# Remove dev dependencies after build to keep image small
+RUN npm prune --omit=dev
 
 # Expose port
 EXPOSE 3000
