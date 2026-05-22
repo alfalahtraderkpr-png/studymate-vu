@@ -6,9 +6,8 @@ const nextConfig: NextConfig = {
     ignoreBuildErrors: true,
   },
   reactStrictMode: false,
-  // For Vercel serverless functions
-  serverExternalPackages: ["puppeteer", "@sparticuz/chromium"],
-  // Increase function timeout for VULMS login
+  // For Vercel serverless functions - these packages need to be bundled externally
+  serverExternalPackages: ["puppeteer-core", "@sparticuz/chromium"],
   experimental: {
     serverActions: {
       bodySizeLimit: "2mb",

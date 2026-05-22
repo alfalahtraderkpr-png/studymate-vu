@@ -67,3 +67,4 @@ supervise-server.sh
 /mini-services
 /examples
 .zscripts
+.cache

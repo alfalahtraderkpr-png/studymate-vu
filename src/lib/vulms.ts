@@ -1,6 +1,10 @@
-import puppeteer from 'puppeteer';
+// VULMS automation library
+// Uses puppeteer-core + @sparticuz/chromium on Vercel
+// Uses puppeteer-core + local Chrome on development
 
-// VULMS is ASP.NET WebForms — NOT Moodle
+import puppeteer from 'puppeteer-core';
+import type { Browser, Page } from 'puppeteer-core';
+
 const VULMS_BASE = 'https://vulms.vu.edu.pk';
 const VULMS_LOGIN = 'https://vulms.vu.edu.pk/';
 
@@ -39,32 +43,59 @@ const BROWSER_ARGS = [
 // Check if running on Vercel serverless
 const isVercel = process.env.VERCEL === '1';
 
-async function launchBrowser() {
+async function launchBrowser(): Promise<Browser> {
   if (isVercel) {
-    // On Vercel, use @sparticuz/chromium
-    try {
-      const chromium = await import('@sparticuz/chromium');
-      const browser = await puppeteer.launch({
-        args: chromium.default.args,
-        defaultViewport: chromium.default.defaultViewport,
-        executablePath: await chromium.default.executablePath(),
-        headless: chromium.default.headless,
-        ignoreHTTPSErrors: true,
-      });
-      return browser;
-    } catch {
-      console.warn('@sparticuz/chromium not found, falling back to default Puppeteer');
-    }
+    // On Vercel serverless — use @sparticuz/chromium
+    const chromium = await import('@sparticuz/chromium');
+    
+    const browser = await puppeteer.launch({
+      args: [...chromium.default.args, ...BROWSER_ARGS],
+      defaultViewport: chromium.default.defaultViewport,
+      executablePath: await chromium.default.executablePath(),
+      headless: chromium.default.headless,
+      ignoreHTTPSErrors: true,
+    });
+    return browser;
   }
 
-  // Local development - use regular Puppeteer
-  return puppeteer.launch({
+  // Local development — use system Chrome/Chromium
+  // Try common paths for Chrome
+  const executablePath = getLocalChromePath();
+  
+  const browser = await puppeteer.launch({
     headless: true,
+    executablePath,
     args: BROWSER_ARGS,
   });
+  return browser;
 }
 
-function addStealthScripts(page: puppeteer.Page) {
+function getLocalChromePath(): string {
+  const platform = process.platform;
+  
+  if (platform === 'linux') {
+    // Common Linux Chrome paths
+    const paths = [
+      '/usr/bin/google-chrome',
+      '/usr/bin/chromium-browser',
+      '/usr/bin/chromium',
+      '/snap/bin/chromium',
+    ];
+    const fs = require('fs');
+    for (const p of paths) {
+      try { if (fs.existsSync(p)) return p; } catch {}
+    }
+  } else if (platform === 'darwin') {
+    return '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
+  } else if (platform === 'win32') {
+    return 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
+  }
+  
+  // Fallback — let puppeteer-core figure it out
+  return '/usr/bin/google-chrome-stable';
+}
+
+function addStealthScripts(page: Page) {
   page.evaluateOnNewDocument(() => {
     Object.defineProperty(navigator, 'webdriver', { get: () => false });
     Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
@@ -109,7 +140,7 @@ export async function loginToVULMS(studentId: string, password: string) {
 
     await randomDelay(500, 1200);
 
-    // Wait for reCAPTCHA v3
+    // Wait for reCAPTCHA v3 (invisible — auto-fills in background)
     await page.waitForFunction(
       () => {
         const recaptchaField = document.querySelector('#g-recaptcha-response') as HTMLTextAreaElement;
@@ -122,11 +153,12 @@ export async function loginToVULMS(studentId: string, password: string) {
 
     await randomDelay(500, 1000);
 
-    // Click Sign In
+    // Click Sign In button
     await Promise.all([
       page.click('#ibtnLogin'),
       page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 }),
     ]).catch(async () => {
+      // Fallback: submit form via JS
       await page.evaluate(() => {
         const form = document.querySelector('#ctl00') as HTMLFormElement;
         if (form) form.submit();
@@ -134,7 +166,7 @@ export async function loginToVULMS(studentId: string, password: string) {
       await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 }).catch(() => {});
     });
 
-    // Check login success
+    // Check if login was successful
     const loginFormVisible = await page.evaluate(() => {
       const usernameField = document.querySelector('#txtStudentID') as HTMLInputElement;
       return usernameField && usernameField.offsetParent !== null;
@@ -146,13 +178,13 @@ export async function loginToVULMS(studentId: string, password: string) {
         return errEl ? errEl.textContent?.trim() : '';
       });
       await browser.close();
-      throw new Error(errorMsg || 'Login failed. Please check your Student ID and Password.');
+      throw new Error(errorMsg || 'Login failed. Please check your Student ID and Password. Make sure your VULMS account is active.');
     }
 
     // Get cookies
     const cookies = await page.cookies();
 
-    // Get subjects
+    // Get subjects from dashboard
     const subjects = await scrapeSubjects(page);
 
     return { success: true, cookies, subjects, browser };
@@ -162,19 +194,19 @@ export async function loginToVULMS(studentId: string, password: string) {
   }
 }
 
-async function scrapeSubjects(page: puppeteer.Page): Promise<SubjectInfo[]> {
+async function scrapeSubjects(page: Page): Promise<SubjectInfo[]> {
   try {
     await randomDelay(1000, 2000);
 
     const subjects = await page.evaluate(() => {
       const results: Array<{ name: string; code: string; url: string }> = [];
 
+      // Strategy 1: Course links on dashboard
       const courseLinks = document.querySelectorAll(
-        'a[href*="CourseHome"], a[href*="coursehome"], a[href*="StudentHome"], ' +
+        'a[href*="CourseHome"], a[href*="coursehome"], a[href*="StudentHome"], a[href*="studenthome"], ' +
         '.m-portlet a[href*="Home"], .course-card a, .subject-card a, ' +
         'a[href*="Home.aspx"], a[href*="home.aspx"]'
       );
-
       courseLinks.forEach((el) => {
         const link = el as HTMLAnchorElement;
         const text = link.textContent?.trim() || '';
@@ -182,6 +214,7 @@ async function scrapeSubjects(page: puppeteer.Page): Promise<SubjectInfo[]> {
         if (text && href) results.push({ name: text, code: '', url: href });
       });
 
+      // Strategy 2: Find VU subject codes (CS101, MTH301, etc.)
       if (results.length === 0) {
         document.querySelectorAll('a[href]').forEach((el) => {
           const link = el as HTMLAnchorElement;
@@ -198,6 +231,7 @@ async function scrapeSubjects(page: puppeteer.Page): Promise<SubjectInfo[]> {
         });
       }
 
+      // Deduplicate
       const seen = new Set<string>();
       return results.filter((r) => {
         const key = r.code || r.name;
@@ -219,7 +253,7 @@ async function scrapeSubjects(page: puppeteer.Page): Promise<SubjectInfo[]> {
   }
 }
 
-export async function getSubjects(cookies: VULMSCookie[], existingBrowser?: puppeteer.Browser) {
+export async function getSubjects(cookies: VULMSCookie[], existingBrowser?: Browser) {
   let browser = existingBrowser;
   let ownBrowser = false;
 
