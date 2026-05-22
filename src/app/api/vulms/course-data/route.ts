@@ -5,7 +5,7 @@ export const maxDuration = 120;
 
 export async function POST(request: NextRequest) {
   try {
-    const { cookies, courseEventTarget } = await request.json();
+    const { cookies, courseEventTarget, subjectCode } = await request.json();
 
     if (!cookies || !courseEventTarget) {
       return NextResponse.json(
@@ -14,7 +14,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const courseData = await getAllCourseData(cookies, courseEventTarget);
+    const courseData = await getAllCourseData(cookies, courseEventTarget, subjectCode);
 
     return NextResponse.json({ courseData });
   } catch (error) {

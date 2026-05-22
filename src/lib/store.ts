@@ -7,6 +7,8 @@ export interface HandoutInfo {
   url: string;
   type: string;
   size?: string;
+  status?: string;
+  duration?: string;
 }
 
 export interface VideoLectureInfo {
@@ -22,6 +24,7 @@ export interface VULMSQuizInfo {
   closeDate: string;
   status: 'completed' | 'not_started' | 'in_progress' | 'expired';
   score?: string;
+  totalMarks?: string;
   eventTarget?: string;
 }
 
@@ -30,6 +33,7 @@ export interface VULMSAssignmentInfo {
   dueDate: string;
   status: 'submitted' | 'not_submitted' | 'overdue' | 'graded';
   score?: string;
+  totalMarks?: string;
   eventTarget?: string;
 }
 
@@ -37,7 +41,9 @@ export interface VULMSGDBInfo {
   name: string;
   openDate: string;
   closeDate: string;
-  status: 'posted' | 'not_posted' | 'overdue';
+  status: 'posted' | 'not_posted' | 'overdue' | 'closed';
+  totalMarks?: string;
+  submitStatus?: string;
   eventTarget?: string;
 }
 
@@ -552,7 +558,7 @@ export const useAppStore = create<AppState>((set, get) => ({
           const courseRes = await fetch('/api/vulms/course-data', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ cookies, courseEventTarget: (data.subjects[i] as {url: string}).url }),
+            body: JSON.stringify({ cookies, courseEventTarget: (data.subjects[i] as {url: string; code: string}).url, subjectCode: (data.subjects[i] as {code: string}).code }),
           });
           const courseData = await courseRes.json();
 
@@ -654,7 +660,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         const courseRes = await fetch('/api/vulms/course-data', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ cookies, courseEventTarget: subjectData.url }),
+          body: JSON.stringify({ cookies, courseEventTarget: subjectData.url, subjectCode: subject.code }),
         });
         const courseData = await courseRes.json();
 
