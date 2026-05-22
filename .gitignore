@@ -68,3 +68,4 @@ supervise-server.sh
 /examples
 .zscripts
 .cache
+upload/
