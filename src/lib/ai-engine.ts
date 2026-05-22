@@ -40,12 +40,12 @@ export async function chatAboutContent(
   const completion = await zai.chat.completions.create({
     messages: [
       {
-        role: 'system',
+        role: 'system' as const,
         content:
           SYSTEM_PROMPT +
           `\n\nContext about the subject:\n${subjectContext}`,
       },
-      ...messages,
+      ...messages.map(m => ({ role: m.role as 'user' | 'assistant' | 'system', content: m.content })),
     ],
   });
   return completion.choices[0]?.message?.content || '';

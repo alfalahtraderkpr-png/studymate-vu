@@ -21,16 +21,48 @@ export interface VULMSCookie {
 export interface SubjectInfo {
   name: string;
   code: string;
-  url: string;
+  url: string; // eventTarget for postback navigation
 }
 
 export interface HandoutInfo {
   name: string;
   url: string;
   type: string;
+  size?: string;
 }
 
-// ─── PUPPETEER LOGIN ────────────────────────────────────────────────────────
+export interface VideoLectureInfo {
+  name: string;
+  youtubeUrl: string;
+  lessonNumber: string;
+}
+
+export interface VULMSQuizInfo {
+  name: string;
+  openDate: string;
+  closeDate: string;
+  status: 'completed' | 'not_started' | 'in_progress' | 'expired';
+  score?: string;
+  eventTarget?: string;
+}
+
+export interface VULMSAssignmentInfo {
+  name: string;
+  dueDate: string;
+  status: 'submitted' | 'not_submitted' | 'overdue' | 'graded';
+  score?: string;
+  eventTarget?: string;
+}
+
+export interface VULMSGDBInfo {
+  name: string;
+  openDate: string;
+  closeDate: string;
+  status: 'posted' | 'not_posted' | 'overdue';
+  eventTarget?: string;
+}
+
+// ─── PUPPETEER HELPERS ────────────────────────────────────────────────────────
 
 async function getPuppeteer() {
   try {
@@ -59,14 +91,12 @@ const BROWSER_ARGS = [
   '--disable-background-networking',
 ];
 
-// Main login function
-export async function loginToVULMS(studentId: string, password: string, _recaptchaToken: string = '') {
+async function createBrowserPage(cookies?: Array<{ name: string; value: string; domain?: string; path?: string }>) {
   const puppeteerModule = await getPuppeteer();
   if (!puppeteerModule) {
-    throw new Error('Puppeteer is not available. Please deploy on Railway with Docker support.');
+    throw new Error('Puppeteer is not available.');
   }
 
-  console.log('[VULMS] Using Puppeteer login for:', studentId);
   const puppeteer = puppeteerModule;
   const executablePath = getChromePath();
 
@@ -78,21 +108,43 @@ export async function loginToVULMS(studentId: string, password: string, _recaptc
   });
 
   const page = await browser.newPage();
+  await page.setViewport({ width: 1280, height: 720 });
+  await page.setUserAgent(
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+  );
+
+  // Stealth
+  await page.evaluateOnNewDocument(() => {
+    Object.defineProperty(navigator, 'webdriver', { get: () => false });
+    Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+    Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en', 'ur'] });
+    (window as any).chrome = { runtime: {} };
+  });
+
+  if (cookies && cookies.length > 0) {
+    await page.setCookie(...cookies.map(c => ({
+      name: c.name,
+      value: c.value,
+      domain: c.domain || 'vulms.vu.edu.pk',
+      path: c.path || '/',
+    })));
+  }
+
+  return { browser, page };
+}
+
+// ─── MAIN LOGIN ────────────────────────────────────────────────────────────────
+
+export async function loginToVULMS(studentId: string, password: string, _recaptchaToken: string = '') {
+  const puppeteerModule = await getPuppeteer();
+  if (!puppeteerModule) {
+    throw new Error('Puppeteer is not available. Please deploy on Railway with Docker support.');
+  }
+
+  console.log('[VULMS] Using Puppeteer login for:', studentId);
+  const { browser, page } = await createBrowserPage();
 
   try {
-    await page.setViewport({ width: 1280, height: 720 });
-    await page.setUserAgent(
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-    );
-
-    // Stealth
-    await page.evaluateOnNewDocument(() => {
-      Object.defineProperty(navigator, 'webdriver', { get: () => false });
-      Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
-      Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en', 'ur'] });
-      (window as Record<string, unknown>).chrome = { runtime: {} };
-    });
-
     // Navigate to VULMS login
     console.log('[VULMS] Loading login page...');
     await page.goto(VULMS_LOGIN, { waitUntil: 'networkidle2', timeout: 45000 });
@@ -170,16 +222,13 @@ export async function loginToVULMS(studentId: string, password: string, _recaptc
         const text = link.textContent?.trim().replace(/\s+/g, ' ') || '';
         const href = link.getAttribute('href') || '';
 
-        // Extract subject code (e.g. ECO402, MGMT627)
         const codeMatch = text.match(/([A-Z]{2,4}\d{3}[A-Z]?)/i);
         const code = codeMatch ? codeMatch[1].toUpperCase() : '';
 
-        // Skip instructor names and empty links
         if (!code || code.length < 4) return;
         if (seen.has(code)) return;
         seen.add(code);
 
-        // Extract the postback event target
         const match = href.match(/__doPostBack\('([^']+)'/);
         const eventTarget = match ? match[1] : '';
 
@@ -193,13 +242,10 @@ export async function loginToVULMS(studentId: string, password: string, _recaptc
 
     console.log('[VULMS] Found subjects:', subjects.length, subjects.map(s => s.code));
 
-    // For each subject, we need to navigate and get the lesson list
-    // But we'll return subjects first and let the frontend request lessons separately
-    // Store eventTarget in the URL field for later use
     const formattedSubjects: SubjectInfo[] = subjects.map(s => ({
       name: s.name,
       code: s.code,
-      url: s.eventTarget, // We use eventTarget as the "URL" to navigate later
+      url: s.eventTarget,
     }));
 
     await browser.close();
@@ -213,7 +259,6 @@ export async function loginToVULMS(studentId: string, password: string, _recaptc
         path: c.path || '/',
       })),
       subjects: formattedSubjects,
-      browser: null,
     };
   } catch (error) {
     await browser.close().catch(() => {});
@@ -221,69 +266,157 @@ export async function loginToVULMS(studentId: string, password: string, _recaptc
   }
 }
 
-// ── GET HANDOUTS FOR A SUBJECT ──
-// This needs to login again with Puppeteer, navigate to the course, and scrape lessons
-export async function getHandouts(
+// ─── NAVIGATE TO COURSE PAGE ───────────────────────────────────────────────────
+// Helper: login with cookies, navigate to dashboard, then click course
+
+async function navigateToCourse(
   cookies: Array<{ name: string; value: string; domain?: string; path?: string }>,
   courseEventTarget: string
 ) {
-  const puppeteerModule = await getPuppeteer();
-  if (!puppeteerModule) {
-    return []; // Fallback: no handouts without Puppeteer
-  }
-
-  const puppeteer = puppeteerModule;
-  const executablePath = getChromePath();
-
-  const browser = await puppeteer.default.launch({
-    headless: true,
-    executablePath,
-    args: BROWSER_ARGS,
-    ignoreDefaultArgs: ['--disable-extensions'],
-  });
-
-  const page = await browser.newPage();
+  const { browser, page } = await createBrowserPage(cookies);
 
   try {
-    await page.setViewport({ width: 1280, height: 720 });
-    await page.setUserAgent(
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-    );
-
-    // Set cookies from login session
-    await page.setCookie(...cookies.map(c => ({
-      name: c.name,
-      value: c.value,
-      domain: c.domain || 'vulms.vu.edu.pk',
-      path: c.path || '/',
-    })));
-
     // Navigate to VULMS dashboard
-    console.log('[VULMS Handouts] Loading dashboard...');
     await page.goto(`${VULMS_BASE}/Home.aspx`, { waitUntil: 'networkidle2', timeout: 45000 });
 
     // Check if session is still valid
-    if (page.url().includes('Login') || (await page.content()).includes('txtStudentID')) {
+    const pageContent = await page.content();
+    if (page.url().includes('Login') || pageContent.includes('txtStudentID')) {
       await browser.close();
       throw new Error('Session expired. Please login again.');
     }
 
     // Click on the course using postback
-    console.log('[VULMS Handouts] Navigating to course:', courseEventTarget);
+    console.log('[VULMS] Navigating to course:', courseEventTarget);
     await page.evaluate((target) => {
-      (window as Record<string, unknown>).__doPostBack(target, '');
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (window as any).__doPostBack(target, '');
     }, courseEventTarget);
 
     await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 }).catch(() => {});
-    console.log('[VULMS Handouts] Course page URL:', page.url());
+    console.log('[VULMS] Course page URL:', page.url());
 
-    // Scrape lesson/handout links from the course page
-    const lessons = await page.evaluate(() => {
-      const results: Array<{ name: string; eventTarget: string; type: string }> = [];
+    // Wait a bit for dynamic content to load
+    await new Promise(r => setTimeout(r, 2000));
+
+    return { browser, page };
+  } catch (error) {
+    await browser.close().catch(() => {});
+    throw error;
+  }
+}
+
+// ─── GET HANDOUTS FOR A SUBJECT ────────────────────────────────────────────────
+// Navigates to the course and scrapes download files + lesson list
+
+export async function getHandouts(
+  cookies: Array<{ name: string; value: string; domain?: string; path?: string }>,
+  courseEventTarget: string
+) {
+  const { browser, page } = await navigateToCourse(cookies, courseEventTarget);
+
+  try {
+    // First try to find and click on "Downloads" or "Download Files" tab/link
+    console.log('[VULMS Handouts] Looking for download section...');
+
+    // Try clicking download tab/link
+    const downloadTabClicked = await page.evaluate(() => {
+      // Try multiple selectors for download tab
+      const selectors = [
+        'a[href*="lbtnDownloadFiles"]',
+        'a[href*="lbtnDownloads"]',
+        'a:contains("Download")',
+        'a:contains("Handouts")',
+        '#lbtnDownloadFiles',
+        'a[id*="Download"]',
+        'a[id*="lbtnDownload"]',
+        'li[id*="Download"] a',
+        'a[href*="Download"]',
+      ];
+
+      for (const sel of selectors) {
+        try {
+          // Use jQuery-style :contains not available in querySelectorAll
+          if (sel.includes(':contains')) continue;
+          const el = document.querySelector(sel) as HTMLAnchorElement;
+          if (el) {
+            el.click();
+            return true;
+          }
+        } catch { }
+      }
+
+      // Try by text content
+      const allLinks = document.querySelectorAll('a');
+      for (const link of allLinks) {
+        const text = link.textContent?.trim().toLowerCase() || '';
+        if (text.includes('download') || text.includes('handout')) {
+          (link as HTMLAnchorElement).click();
+          return true;
+        }
+      }
+
+      return false;
+    });
+
+    if (downloadTabClicked) {
+      console.log('[VULMS Handouts] Clicked download tab, waiting for content...');
+      await new Promise(r => setTimeout(r, 2000));
+      await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 10000 }).catch(() => {});
+    }
+
+    // Scrape download files
+    const handouts = await page.evaluate(() => {
+      const results: Array<{ name: string; url: string; type: string; size: string }> = [];
       const seen = new Set<string>();
 
-      // VULMS uses lstWeeklySchedule > rptIndex > lbtnViewLesson pattern
-      const lessonLinks = document.querySelectorAll('a[href*="lbtnViewLesson"]');
+      // Method 1: Look for file download links (PDF, PPTX, DOC, etc.)
+      const fileLinks = document.querySelectorAll('a[href*=".pdf"], a[href*=".pptx"], a[href*=".ppt"], a[href*=".doc"], a[href*=".docx"], a[href*=".zip"]');
+      fileLinks.forEach((el) => {
+        const link = el as HTMLAnchorElement;
+        const href = link.href || link.getAttribute('href') || '';
+        const text = link.textContent?.trim().replace(/\s+/g, ' ') || '';
+        if (!text || seen.has(text)) return;
+        seen.add(text);
+
+        const ext = href.split('.').pop()?.toUpperCase() || 'FILE';
+        results.push({ name: text, url: href, type: ext, size: '' });
+      });
+
+      // Method 2: Look for GridView with download links
+      const gridRows = document.querySelectorAll('table tr, .grid-row, .m-widget4__item, [class*="download"] tr');
+      gridRows.forEach((row) => {
+        const links = row.querySelectorAll('a');
+        links.forEach((el) => {
+          const link = el as HTMLAnchorElement;
+          const href = link.href || link.getAttribute('href') || '';
+          const text = link.textContent?.trim().replace(/\s+/g, ' ') || link.title || '';
+
+          if (!text || seen.has(text)) return;
+          if (href.includes('javascript:') || href === '#') return;
+
+          // Check if it looks like a download link
+          if (href.includes('/LMS/') || href.includes('Download') || href.includes('Handout') ||
+            href.includes('Content') || href.includes('File') || href.includes('upload')) {
+            seen.add(text);
+
+            let ext = 'FILE';
+            if (href.includes('.pdf')) ext = 'PDF';
+            else if (href.includes('.pptx') || href.includes('.ppt')) ext = 'PPTX';
+            else if (href.includes('.docx') || href.includes('.doc')) ext = 'DOC';
+            else if (href.includes('.zip')) ext = 'ZIP';
+
+            // Try to get file size from nearby text
+            const sizeEl = row.querySelector('[class*="size"], td:nth-child(3), span');
+            const size = sizeEl?.textContent?.trim() || '';
+
+            results.push({ name: text, url: href, type: ext, size });
+          }
+        });
+      });
+
+      // Method 3: VULMS specific - lstWeeklySchedule lesson links
+      const lessonLinks = document.querySelectorAll('a[href*="lbtnViewLesson"], a[href*="ibtnLesson"]');
       lessonLinks.forEach((el) => {
         const link = el as HTMLAnchorElement;
         const text = link.textContent?.trim().replace(/\s+/g, ' ') || '';
@@ -296,21 +429,34 @@ export async function getHandouts(
         const eventTarget = match ? match[1] : '';
 
         if (eventTarget) {
-          results.push({ name: text, eventTarget, type: 'lesson' });
+          results.push({ name: text, url: eventTarget, type: 'lesson', size: '' });
+        }
+      });
+
+      // Method 4: Any remaining links that look like course content
+      const contentLinks = document.querySelectorAll('a[href*="CourseHome"], a[href*="Lesson"], a[href*="Lecture"]');
+      contentLinks.forEach((el) => {
+        const link = el as HTMLAnchorElement;
+        const text = link.textContent?.trim().replace(/\s+/g, ' ') || '';
+        const href = link.getAttribute('href') || '';
+
+        if (!text || seen.has(text)) return;
+        if (href.includes('javascript:') && !href.includes('__doPostBack')) return;
+        seen.add(text);
+
+        const match = href.match(/__doPostBack\('([^']+)'/);
+        const eventTarget = match ? match[1] : '';
+        const url = eventTarget || (href.startsWith('http') ? href : '');
+
+        if (url) {
+          results.push({ name: text, url, type: 'content', size: '' });
         }
       });
 
       return results;
     });
 
-    console.log('[VULMS Handouts] Found lessons:', lessons.length);
-
-    // Format as HandoutInfo — we store eventTarget in URL field
-    const handouts: HandoutInfo[] = lessons.map(l => ({
-      name: l.name,
-      url: l.eventTarget, // eventTarget stored here for later use
-      type: l.type,
-    }));
+    console.log('[VULMS Handouts] Found items:', handouts.length);
 
     await browser.close();
     return handouts;
@@ -321,29 +467,809 @@ export async function getHandouts(
   }
 }
 
-// ── GET SUBJECTS (re-scan with existing cookies) ──
+// ─── GET VIDEO LECTURES ────────────────────────────────────────────────────────
+
+export async function getVideoLectures(
+  cookies: Array<{ name: string; value: string; domain?: string; path?: string }>,
+  courseEventTarget: string
+) {
+  const { browser, page } = await navigateToCourse(cookies, courseEventTarget);
+
+  try {
+    // Try to click on "Video Lectures" or "Lectures" tab
+    console.log('[VULMS Videos] Looking for video lectures section...');
+
+    const videoTabClicked = await page.evaluate(() => {
+      // Try clicking video/lectures tab
+      const allLinks = document.querySelectorAll('a, button');
+      for (const link of allLinks) {
+        const text = link.textContent?.trim().toLowerCase() || '';
+        if (text.includes('video') || text.includes('lecture') || text.includes('youtube')) {
+          (link as HTMLAnchorElement).click();
+          return true;
+        }
+      }
+
+      // Try specific selectors
+      const selectors = [
+        'a[href*="lbtnVideoLectures"]',
+        'a[href*="lbtnLectures"]',
+        'a[id*="Video"]',
+        'a[id*="Lecture"]',
+        'a[id*="lbtnVideo"]',
+      ];
+
+      for (const sel of selectors) {
+        try {
+          const el = document.querySelector(sel) as HTMLAnchorElement;
+          if (el) { el.click(); return true; }
+        } catch { }
+      }
+
+      return false;
+    });
+
+    if (videoTabClicked) {
+      console.log('[VULMS Videos] Clicked video tab, waiting for content...');
+      await new Promise(r => setTimeout(r, 2000));
+      await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 10000 }).catch(() => {});
+    }
+
+    // Scrape video/YouTube links
+    const videos = await page.evaluate(() => {
+      const results: Array<{ name: string; youtubeUrl: string; lessonNumber: string }> = [];
+      const seen = new Set<string>();
+
+      // Method 1: YouTube iframes
+      const ytIframes = document.querySelectorAll('iframe[src*="youtube.com"], iframe[src*="youtu.be"]');
+      ytIframes.forEach((iframe, index) => {
+        const src = iframe.getAttribute('src') || '';
+        if (src && !seen.has(src)) {
+          seen.add(src);
+          results.push({
+            name: `Video Lecture ${index + 1}`,
+            youtubeUrl: src.replace(/\/embed\//, '/watch?v=').split('?')[0] || src,
+            lessonNumber: String(index + 1),
+          });
+        }
+      });
+
+      // Method 2: YouTube links
+      const ytLinks = document.querySelectorAll('a[href*="youtube.com"], a[href*="youtu.be"]');
+      ytLinks.forEach((el, index) => {
+        const link = el as HTMLAnchorElement;
+        const href = link.href || '';
+        const text = link.textContent?.trim().replace(/\s+/g, ' ') || `Video Lecture ${index + 1}`;
+
+        if (!href || seen.has(href)) return;
+        seen.add(href);
+
+        // Extract YouTube video ID for proper URL
+        let ytUrl = href;
+        const videoIdMatch = href.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/)([a-zA-Z0-9_-]+)/);
+        if (videoIdMatch) {
+          ytUrl = `https://www.youtube.com/watch?v=${videoIdMatch[1]}`;
+        }
+
+        results.push({
+          name: text,
+          youtubeUrl: ytUrl,
+          lessonNumber: String(index + 1),
+        });
+      });
+
+      // Method 3: Look in lesson/weekly schedule rows for YouTube links
+      const rows = document.querySelectorAll('table tr, .m-widget4__item, [class*="lecture"]');
+      rows.forEach((row, index) => {
+        const links = row.querySelectorAll('a[href*="youtube"], a[href*="youtu"]');
+        links.forEach((el) => {
+          const link = el as HTMLAnchorElement;
+          const href = link.href || '';
+          if (!href || seen.has(href)) return;
+          seen.add(href);
+
+          const rowText = row.textContent?.trim().replace(/\s+/g, ' ') || '';
+          const lessonMatch = rowText.match(/lecture\s*(\d+)/i) || rowText.match(/lesson\s*(\d+)/i);
+
+          let ytUrl = href;
+          const videoIdMatch = href.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/)([a-zA-Z0-9_-]+)/);
+          if (videoIdMatch) {
+            ytUrl = `https://www.youtube.com/watch?v=${videoIdMatch[1]}`;
+          }
+
+          results.push({
+            name: rowText.substring(0, 80) || `Video Lecture ${index + 1}`,
+            youtubeUrl: ytUrl,
+            lessonNumber: lessonMatch ? lessonMatch[1] : String(index + 1),
+          });
+        });
+      });
+
+      return results;
+    });
+
+    console.log('[VULMS Videos] Found videos:', videos.length);
+
+    await browser.close();
+    return videos;
+  } catch (error) {
+    await browser.close().catch(() => {});
+    console.error('[VULMS Videos] Error:', error instanceof Error ? error.message : error);
+    return [];
+  }
+}
+
+// ─── GET QUIZZES ────────────────────────────────────────────────────────────────
+
+export async function getQuizzes(
+  cookies: Array<{ name: string; value: string; domain?: string; path?: string }>,
+  courseEventTarget: string
+) {
+  const { browser, page } = await navigateToCourse(cookies, courseEventTarget);
+
+  try {
+    // Try to click on "Quiz" or "Graded Quiz" tab
+    console.log('[VULMS Quizzes] Looking for quiz section...');
+
+    const quizTabClicked = await page.evaluate(() => {
+      const allLinks = document.querySelectorAll('a, button');
+      for (const link of allLinks) {
+        const text = link.textContent?.trim().toLowerCase() || '';
+        if (text.includes('quiz') && (text.includes('graded') || text.includes('quiz'))) {
+          (link as HTMLAnchorElement).click();
+          return true;
+        }
+      }
+
+      const selectors = [
+        'a[href*="lbtnQuiz"]',
+        'a[href*="lbtnGradedQuiz"]',
+        'a[id*="Quiz"]',
+        'a[id*="quiz"]',
+      ];
+
+      for (const sel of selectors) {
+        try {
+          const el = document.querySelector(sel) as HTMLAnchorElement;
+          if (el) { el.click(); return true; }
+        } catch { }
+      }
+
+      return false;
+    });
+
+    if (quizTabClicked) {
+      console.log('[VULMS Quizzes] Clicked quiz tab, waiting for content...');
+      await new Promise(r => setTimeout(r, 2000));
+      await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 10000 }).catch(() => {});
+    }
+
+    // Scrape quiz information
+    const quizzes = await page.evaluate(() => {
+      const results: Array<{
+        name: string;
+        openDate: string;
+        closeDate: string;
+        status: string;
+        score: string;
+        eventTarget: string;
+      }> = [];
+      const seen = new Set<string>();
+
+      // VULMS typically shows quizzes in a GridView
+      const rows = document.querySelectorAll('table[id*="gvQuiz"] tr, table[id*="dgQuiz"] tr, table[id*="Graded"] tr, .m-widget4__item');
+
+      rows.forEach((row) => {
+        const cells = row.querySelectorAll('td');
+        if (cells.length < 2) return;
+
+        const rowText = row.textContent?.trim().replace(/\s+/g, ' ') || '';
+        if (!rowText || !rowText.toLowerCase().includes('quiz')) return;
+
+        // Try to extract quiz name, dates, status, score
+        let name = '';
+        let openDate = '';
+        let closeDate = '';
+        let status = 'not_started';
+        let score = '';
+        let eventTarget = '';
+
+        // Extract quiz name
+        const nameEl = cells[0]?.querySelector('a') || cells[0];
+        name = nameEl?.textContent?.trim() || '';
+
+        // Look for postback in name link
+        const nameLink = cells[0]?.querySelector('a');
+        if (nameLink) {
+          const href = nameLink.getAttribute('href') || '';
+          const match = href.match(/__doPostBack\('([^']+)'/);
+          eventTarget = match ? match[1] : '';
+        }
+
+        // Extract dates from cells
+        for (let i = 1; i < cells.length; i++) {
+          const cellText = cells[i]?.textContent?.trim() || '';
+
+          // Check for date patterns
+          if (cellText.match(/\d{1,2}\/\d{1,2}\/\d{2,4}/)) {
+            if (!openDate) openDate = cellText;
+            else if (!closeDate) closeDate = cellText;
+          }
+
+          // Check for status
+          const lower = cellText.toLowerCase();
+          if (lower.includes('attempt') || lower.includes('completed') || lower.includes('taken')) {
+            status = 'completed';
+          } else if (lower.includes('not attempt') || lower.includes('not taken') || lower.includes('pending')) {
+            status = 'not_started';
+          }
+
+          // Check for score
+          if (cellText.match(/\d+\/\d+|\d+%/)) {
+            score = cellText;
+            status = 'completed';
+          }
+        }
+
+        if (name && !seen.has(name)) {
+          seen.add(name);
+          results.push({ name, openDate, closeDate, status, score, eventTarget });
+        }
+      });
+
+      // Also check for quiz info in general page content
+      const quizLinks = document.querySelectorAll('a[href*="Quiz"], a[href*="quiz"]');
+      quizLinks.forEach((el) => {
+        const link = el as HTMLAnchorElement;
+        const text = link.textContent?.trim().replace(/\s+/g, ' ') || '';
+        const href = link.getAttribute('href') || '';
+
+        if (!text || seen.has(text)) return;
+        if (!text.toLowerCase().includes('quiz')) return;
+        seen.add(text);
+
+        const match = href.match(/__doPostBack\('([^']+)'/);
+        const eventTarget = match ? match[1] : '';
+
+        results.push({
+          name: text,
+          openDate: '',
+          closeDate: '',
+          status: 'not_started',
+          score: '',
+          eventTarget,
+        });
+      });
+
+      return results;
+    });
+
+    console.log('[VULMS Quizzes] Found quizzes:', quizzes.length);
+
+    await browser.close();
+    return quizzes;
+  } catch (error) {
+    await browser.close().catch(() => {});
+    console.error('[VULMS Quizzes] Error:', error instanceof Error ? error.message : error);
+    return [];
+  }
+}
+
+// ─── GET ASSIGNMENTS ────────────────────────────────────────────────────────────
+
+export async function getAssignments(
+  cookies: Array<{ name: string; value: string; domain?: string; path?: string }>,
+  courseEventTarget: string
+) {
+  const { browser, page } = await navigateToCourse(cookies, courseEventTarget);
+
+  try {
+    // Try to click on "Assignment" tab
+    console.log('[VULMS Assignments] Looking for assignment section...');
+
+    const assignmentTabClicked = await page.evaluate(() => {
+      const allLinks = document.querySelectorAll('a, button');
+      for (const link of allLinks) {
+        const text = link.textContent?.trim().toLowerCase() || '';
+        if (text.includes('assignment') || text.includes('assignment')) {
+          (link as HTMLAnchorElement).click();
+          return true;
+        }
+      }
+
+      const selectors = [
+        'a[href*="lbtnAssignment"]',
+        'a[href*="lbtnAssignments"]',
+        'a[id*="Assignment"]',
+        'a[id*="assignment"]',
+      ];
+
+      for (const sel of selectors) {
+        try {
+          const el = document.querySelector(sel) as HTMLAnchorElement;
+          if (el) { el.click(); return true; }
+        } catch { }
+      }
+
+      return false;
+    });
+
+    if (assignmentTabClicked) {
+      console.log('[VULMS Assignments] Clicked assignment tab, waiting for content...');
+      await new Promise(r => setTimeout(r, 2000));
+      await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 10000 }).catch(() => {});
+    }
+
+    // Scrape assignment information
+    const assignments = await page.evaluate(() => {
+      const results: Array<{
+        name: string;
+        dueDate: string;
+        status: string;
+        score: string;
+        eventTarget: string;
+      }> = [];
+      const seen = new Set<string>();
+
+      // VULMS typically shows assignments in a GridView
+      const rows = document.querySelectorAll('table[id*="gvAssignment"] tr, table[id*="dgAssignment"] tr, table[id*="Assignment"] tr, .m-widget4__item');
+
+      rows.forEach((row) => {
+        const cells = row.querySelectorAll('td');
+        if (cells.length < 2) return;
+
+        const rowText = row.textContent?.trim().replace(/\s+/g, ' ') || '';
+        if (!rowText || !rowText.toLowerCase().includes('assign')) return;
+
+        let name = '';
+        let dueDate = '';
+        let status = 'not_submitted';
+        let score = '';
+        let eventTarget = '';
+
+        // Extract assignment name
+        const nameEl = cells[0]?.querySelector('a') || cells[0];
+        name = nameEl?.textContent?.trim() || '';
+
+        // Look for postback
+        const nameLink = cells[0]?.querySelector('a');
+        if (nameLink) {
+          const href = nameLink.getAttribute('href') || '';
+          const match = href.match(/__doPostBack\('([^']+)'/);
+          eventTarget = match ? match[1] : '';
+        }
+
+        // Extract from cells
+        for (let i = 1; i < cells.length; i++) {
+          const cellText = cells[i]?.textContent?.trim() || '';
+
+          if (cellText.match(/\d{1,2}\/\d{1,2}\/\d{2,4}/) && !dueDate) {
+            dueDate = cellText;
+          }
+
+          const lower = cellText.toLowerCase();
+          if (lower.includes('submitted') || lower.includes('uploaded')) {
+            status = 'submitted';
+          } else if (lower.includes('not submit') || lower.includes('pending')) {
+            status = 'not_submitted';
+          } else if (lower.includes('overdue') || lower.includes('late')) {
+            status = 'overdue';
+          } else if (lower.includes('graded') || lower.includes('marks')) {
+            status = 'graded';
+          }
+
+          if (cellText.match(/\d+\/\d+|\d+%/)) {
+            score = cellText;
+          }
+        }
+
+        if (name && !seen.has(name)) {
+          seen.add(name);
+          results.push({ name, dueDate, status, score, eventTarget });
+        }
+      });
+
+      // Also check for assignment links
+      const assignLinks = document.querySelectorAll('a[href*="Assignment"], a[href*="assignment"]');
+      assignLinks.forEach((el) => {
+        const link = el as HTMLAnchorElement;
+        const text = link.textContent?.trim().replace(/\s+/g, ' ') || '';
+        const href = link.getAttribute('href') || '';
+
+        if (!text || seen.has(text)) return;
+        if (!text.toLowerCase().includes('assign')) return;
+        seen.add(text);
+
+        const match = href.match(/__doPostBack\('([^']+)'/);
+        const eventTarget = match ? match[1] : '';
+
+        results.push({
+          name: text,
+          dueDate: '',
+          status: 'not_submitted',
+          score: '',
+          eventTarget,
+        });
+      });
+
+      return results;
+    });
+
+    console.log('[VULMS Assignments] Found assignments:', assignments.length);
+
+    await browser.close();
+    return assignments;
+  } catch (error) {
+    await browser.close().catch(() => {});
+    console.error('[VULMS Assignments] Error:', error instanceof Error ? error.message : error);
+    return [];
+  }
+}
+
+// ─── GET GDBs ──────────────────────────────────────────────────────────────────
+
+export async function getGDBs(
+  cookies: Array<{ name: string; value: string; domain?: string; path?: string }>,
+  courseEventTarget: string
+) {
+  const { browser, page } = await navigateToCourse(cookies, courseEventTarget);
+
+  try {
+    const gdbTabClicked = await page.evaluate(() => {
+      const allLinks = document.querySelectorAll('a, button');
+      for (const link of allLinks) {
+        const text = link.textContent?.trim().toLowerCase() || '';
+        if (text.includes('gdb') || text.includes('graded discussion')) {
+          (link as HTMLAnchorElement).click();
+          return true;
+        }
+      }
+      return false;
+    });
+
+    if (gdbTabClicked) {
+      await new Promise(r => setTimeout(r, 2000));
+      await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 10000 }).catch(() => {});
+    }
+
+    const gdbs = await page.evaluate(() => {
+      const results: Array<{
+        name: string;
+        openDate: string;
+        closeDate: string;
+        status: string;
+        eventTarget: string;
+      }> = [];
+      const seen = new Set<string>();
+
+      const rows = document.querySelectorAll('table[id*="gvGDB"] tr, table[id*="GDB"] tr, table[id*="Discussion"] tr');
+      rows.forEach((row) => {
+        const cells = row.querySelectorAll('td');
+        if (cells.length < 2) return;
+
+        const rowText = row.textContent?.trim().replace(/\s+/g, ' ') || '';
+        if (!rowText.toLowerCase().includes('gdb') && !rowText.toLowerCase().includes('discussion')) return;
+
+        let name = cells[0]?.textContent?.trim() || '';
+        let openDate = '';
+        let closeDate = '';
+        let status = 'not_posted';
+        let eventTarget = '';
+
+        const nameLink = cells[0]?.querySelector('a');
+        if (nameLink) {
+          const href = nameLink.getAttribute('href') || '';
+          const match = href.match(/__doPostBack\('([^']+)'/);
+          eventTarget = match ? match[1] : '';
+        }
+
+        for (let i = 1; i < cells.length; i++) {
+          const cellText = cells[i]?.textContent?.trim() || '';
+          if (cellText.match(/\d{1,2}\/\d{1,2}\/\d{2,4}/)) {
+            if (!openDate) openDate = cellText;
+            else if (!closeDate) closeDate = cellText;
+          }
+          const lower = cellText.toLowerCase();
+          if (lower.includes('posted') || lower.includes('submitted')) status = 'posted';
+          else if (lower.includes('not post')) status = 'not_posted';
+        }
+
+        if (name && !seen.has(name)) {
+          seen.add(name);
+          results.push({ name, openDate, closeDate, status, eventTarget });
+        }
+      });
+
+      return results;
+    });
+
+    console.log('[VULMS GDBs] Found GDBs:', gdbs.length);
+    await browser.close();
+    return gdbs;
+  } catch (error) {
+    await browser.close().catch(() => {});
+    console.error('[VULMS GDBs] Error:', error instanceof Error ? error.message : error);
+    return [];
+  }
+}
+
+// ─── GET ALL COURSE DATA (comprehensive) ────────────────────────────────────────
+
+export async function getAllCourseData(
+  cookies: Array<{ name: string; value: string; domain?: string; path?: string }>,
+  courseEventTarget: string
+) {
+  const { browser, page } = await navigateToCourse(cookies, courseEventTarget);
+
+  try {
+    // Scrape everything from the course home page at once
+    console.log('[VULMS AllData] Scraping all course data...');
+
+    const courseData = await page.evaluate(() => {
+      const result: {
+        handouts: Array<{ name: string; url: string; type: string; size: string }>;
+        videos: Array<{ name: string; youtubeUrl: string; lessonNumber: string }>;
+        quizzes: Array<{ name: string; openDate: string; closeDate: string; status: string; score: string; eventTarget: string }>;
+        assignments: Array<{ name: string; dueDate: string; status: string; score: string; eventTarget: string }>;
+        gdbs: Array<{ name: string; openDate: string; closeDate: string; status: string; eventTarget: string }>;
+        lessons: Array<{ name: string; eventTarget: string; lessonNumber: string }>;
+        // Debug info
+        pageLinks: string[];
+        pageText: string;
+      } = {
+        handouts: [],
+        videos: [],
+        quizzes: [],
+        assignments: [],
+        gdbs: [],
+        lessons: [],
+        pageLinks: [],
+        pageText: '',
+      };
+
+      const seen = new Set<string>();
+
+      // Collect ALL links on the page for debugging
+      const allLinks = document.querySelectorAll('a');
+      allLinks.forEach((el) => {
+        const link = el as HTMLAnchorElement;
+        const href = link.getAttribute('href') || '';
+        const text = link.textContent?.trim().replace(/\s+/g, ' ') || '';
+        if (href && text) {
+          result.pageLinks.push(`${text} | ${href}`);
+        }
+      });
+
+      // Get page text for debugging (first 3000 chars)
+      result.pageText = document.body.innerText.substring(0, 3000);
+
+      // ─── LESSONS ─────────────────────
+      const lessonLinks = document.querySelectorAll('a[href*="lbtnViewLesson"], a[href*="ibtnLesson"], a[href*="Lesson"]');
+      lessonLinks.forEach((el, index) => {
+        const link = el as HTMLAnchorElement;
+        const text = link.textContent?.trim().replace(/\s+/g, ' ') || '';
+        const href = link.getAttribute('href') || '';
+        if (!text || seen.has('lesson:' + text)) return;
+        seen.add('lesson:' + text);
+
+        const match = href.match(/__doPostBack\('([^']+)'/);
+        const eventTarget = match ? match[1] : '';
+
+        const lecMatch = text.match(/lecture\s*(\d+)/i) || text.match(/lesson\s*(\d+)/i) || text.match(/(\d+)/);
+
+        if (eventTarget) {
+          result.lessons.push({
+            name: text,
+            eventTarget,
+            lessonNumber: lecMatch ? lecMatch[1] : String(index + 1),
+          });
+        }
+      });
+
+      // ─── DOWNLOAD FILES ──────────────
+      // PDF/PPTX/DOC links
+      const fileLinks = document.querySelectorAll('a[href*=".pdf"], a[href*=".pptx"], a[href*=".ppt"], a[href*=".doc"], a[href*=".docx"], a[href*=".zip"]');
+      fileLinks.forEach((el) => {
+        const link = el as HTMLAnchorElement;
+        const href = link.href || '';
+        const text = link.textContent?.trim().replace(/\s+/g, ' ') || '';
+        if (!text || seen.has('file:' + text)) return;
+        seen.add('file:' + text);
+
+        const ext = href.split('.').pop()?.toUpperCase() || 'FILE';
+        result.handouts.push({ name: text, url: href, type: ext, size: '' });
+      });
+
+      // ─── YOUTUBE / VIDEO LINKS ───────
+      const ytIframes = document.querySelectorAll('iframe[src*="youtube.com"], iframe[src*="youtu.be"]');
+      ytIframes.forEach((iframe, index) => {
+        const src = iframe.getAttribute('src') || '';
+        if (src && !seen.has('yt:' + src)) {
+          seen.add('yt:' + src);
+          const videoIdMatch = src.match(/youtube\.com\/embed\/([a-zA-Z0-9_-]+)/);
+          const ytUrl = videoIdMatch ? `https://www.youtube.com/watch?v=${videoIdMatch[1]}` : src;
+          result.videos.push({
+            name: `Video Lecture ${index + 1}`,
+            youtubeUrl: ytUrl,
+            lessonNumber: String(index + 1),
+          });
+        }
+      });
+
+      const ytLinks = document.querySelectorAll('a[href*="youtube.com"], a[href*="youtu.be"]');
+      ytLinks.forEach((el, index) => {
+        const link = el as HTMLAnchorElement;
+        const href = link.href || '';
+        const text = link.textContent?.trim().replace(/\s+/g, ' ') || `Video Lecture ${index + 1}`;
+        if (!href || seen.has('yt:' + href)) return;
+        seen.add('yt:' + href);
+
+        const videoIdMatch = href.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/)([a-zA-Z0-9_-]+)/);
+        const ytUrl = videoIdMatch ? `https://www.youtube.com/watch?v=${videoIdMatch[1]}` : href;
+
+        result.videos.push({
+          name: text,
+          youtubeUrl: ytUrl,
+          lessonNumber: String(index + 1),
+        });
+      });
+
+      // ─── QUIZZES ────────────────────
+      const quizRows = document.querySelectorAll('table[id*="gvQuiz"] tr, table[id*="dgQuiz"] tr, table[id*="Graded"] tr');
+      quizRows.forEach((row) => {
+        const cells = row.querySelectorAll('td');
+        if (cells.length < 2) return;
+
+        const rowText = row.textContent?.trim().replace(/\s+/g, ' ') || '';
+        if (!rowText.toLowerCase().includes('quiz')) return;
+
+        let name = cells[0]?.textContent?.trim() || '';
+        let openDate = '';
+        let closeDate = '';
+        let status = 'not_started';
+        let score = '';
+        let eventTarget = '';
+
+        const nameLink = cells[0]?.querySelector('a');
+        if (nameLink) {
+          const href = nameLink.getAttribute('href') || '';
+          const match = href.match(/__doPostBack\('([^']+)'/);
+          eventTarget = match ? match[1] : '';
+        }
+
+        for (let i = 1; i < cells.length; i++) {
+          const cellText = cells[i]?.textContent?.trim() || '';
+          if (cellText.match(/\d{1,2}\/\d{1,2}\/\d{2,4}/)) {
+            if (!openDate) openDate = cellText;
+            else if (!closeDate) closeDate = cellText;
+          }
+          const lower = cellText.toLowerCase();
+          if (lower.includes('attempt') || lower.includes('completed') || lower.includes('taken')) status = 'completed';
+          if (cellText.match(/\d+\/\d+|\d+%/)) { score = cellText; status = 'completed'; }
+        }
+
+        if (name && !seen.has('quiz:' + name)) {
+          seen.add('quiz:' + name);
+          result.quizzes.push({ name, openDate, closeDate, status, score, eventTarget });
+        }
+      });
+
+      // ─── ASSIGNMENTS ────────────────
+      const assignRows = document.querySelectorAll('table[id*="gvAssignment"] tr, table[id*="dgAssignment"] tr, table[id*="Assignment"] tr');
+      assignRows.forEach((row) => {
+        const cells = row.querySelectorAll('td');
+        if (cells.length < 2) return;
+
+        const rowText = row.textContent?.trim().replace(/\s+/g, ' ') || '';
+        if (!rowText.toLowerCase().includes('assign')) return;
+
+        let name = cells[0]?.textContent?.trim() || '';
+        let dueDate = '';
+        let status = 'not_submitted';
+        let score = '';
+        let eventTarget = '';
+
+        const nameLink = cells[0]?.querySelector('a');
+        if (nameLink) {
+          const href = nameLink.getAttribute('href') || '';
+          const match = href.match(/__doPostBack\('([^']+)'/);
+          eventTarget = match ? match[1] : '';
+        }
+
+        for (let i = 1; i < cells.length; i++) {
+          const cellText = cells[i]?.textContent?.trim() || '';
+          if (cellText.match(/\d{1,2}\/\d{1,2}\/\d{2,4}/) && !dueDate) dueDate = cellText;
+          const lower = cellText.toLowerCase();
+          if (lower.includes('submitted') || lower.includes('uploaded')) status = 'submitted';
+          else if (lower.includes('not submit') || lower.includes('pending')) status = 'not_submitted';
+          else if (lower.includes('overdue') || lower.includes('late')) status = 'overdue';
+          else if (lower.includes('graded')) status = 'graded';
+          if (cellText.match(/\d+\/\d+|\d+%/)) score = cellText;
+        }
+
+        if (name && !seen.has('assign:' + name)) {
+          seen.add('assign:' + name);
+          result.assignments.push({ name, dueDate, status, score, eventTarget });
+        }
+      });
+
+      // ─── GDBs ───────────────────────
+      const gdbRows = document.querySelectorAll('table[id*="gvGDB"] tr, table[id*="GDB"] tr, table[id*="Discussion"] tr');
+      gdbRows.forEach((row) => {
+        const cells = row.querySelectorAll('td');
+        if (cells.length < 2) return;
+
+        let name = cells[0]?.textContent?.trim() || '';
+        let openDate = '';
+        let closeDate = '';
+        let status = 'not_posted';
+        let eventTarget = '';
+
+        const nameLink = cells[0]?.querySelector('a');
+        if (nameLink) {
+          const href = nameLink.getAttribute('href') || '';
+          const match = href.match(/__doPostBack\('([^']+)'/);
+          eventTarget = match ? match[1] : '';
+        }
+
+        for (let i = 1; i < cells.length; i++) {
+          const cellText = cells[i]?.textContent?.trim() || '';
+          if (cellText.match(/\d{1,2}\/\d{1,2}\/\d{2,4}/)) {
+            if (!openDate) openDate = cellText;
+            else if (!closeDate) closeDate = cellText;
+          }
+          const lower = cellText.toLowerCase();
+          if (lower.includes('posted') || lower.includes('submitted')) status = 'posted';
+        }
+
+        if (name && !seen.has('gdb:' + name)) {
+          seen.add('gdb:' + name);
+          result.gdbs.push({ name, openDate, closeDate, status, eventTarget });
+        }
+      });
+
+      return result;
+    });
+
+    console.log('[VULMS AllData] Results:', {
+      handouts: courseData.handouts.length,
+      videos: courseData.videos.length,
+      quizzes: courseData.quizzes.length,
+      assignments: courseData.assignments.length,
+      gdbs: courseData.gdbs.length,
+      lessons: courseData.lessons.length,
+    });
+
+    // Log debug info
+    console.log('[VULMS AllData] Page links found:', courseData.pageLinks.length);
+    console.log('[VULMS AllData] Page text preview:', courseData.pageText.substring(0, 500));
+
+    await browser.close();
+    return courseData;
+  } catch (error) {
+    await browser.close().catch(() => {});
+    console.error('[VULMS AllData] Error:', error instanceof Error ? error.message : error);
+    return {
+      handouts: [],
+      videos: [],
+      quizzes: [],
+      assignments: [],
+      gdbs: [],
+      lessons: [],
+      pageLinks: [],
+      pageText: '',
+    };
+  }
+}
+
+// ─── GET SUBJECTS (re-scan with existing cookies) ──
 export async function getSubjects(cookies: Array<{ name: string; value: string; domain?: string; path?: string }>) {
   const puppeteerModule = await getPuppeteer();
   if (!puppeteerModule) return [];
 
-  const puppeteer = puppeteerModule;
-  const executablePath = getChromePath();
-
-  const browser = await puppeteer.default.launch({
-    headless: true, executablePath, args: BROWSER_ARGS,
-    ignoreDefaultArgs: ['--disable-extensions'],
-  });
-
-  const page = await browser.newPage();
+  const { browser, page } = await createBrowserPage(cookies);
 
   try {
-    await page.setViewport({ width: 1280, height: 720 });
-    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36');
-    await page.setCookie(...cookies.map(c => ({
-      name: c.name, value: c.value,
-      domain: c.domain || 'vulms.vu.edu.pk', path: c.path || '/',
-    })));
-
     await page.goto(`${VULMS_BASE}/Home.aspx`, { waitUntil: 'networkidle2', timeout: 45000 });
 
     if (page.url().includes('Login') || (await page.content()).includes('txtStudentID')) {
@@ -378,8 +1304,9 @@ export async function getSubjects(cookies: Array<{ name: string; value: string; 
   }
 }
 
-// ── DOWNLOAD HANDOUT CONTENT ──
+// ─── DOWNLOAD HANDOUT CONTENT ────────────────────────────────────────────────
 // Navigate to a lesson page and extract text content
+
 export async function downloadHandoutContent(
   cookies: Array<{ name: string; value: string; domain?: string; path?: string }>,
   lessonEventTarget: string
@@ -389,36 +1316,27 @@ export async function downloadHandoutContent(
     return 'Content not available without browser support.';
   }
 
-  const puppeteer = puppeteerModule;
-  const executablePath = getChromePath();
-
-  const browser = await puppeteer.default.launch({
-    headless: true, executablePath, args: BROWSER_ARGS,
-    ignoreDefaultArgs: ['--disable-extensions'],
-  });
-
-  const page = await browser.newPage();
+  const { browser, page } = await createBrowserPage(cookies);
 
   try {
-    await page.setViewport({ width: 1280, height: 720 });
-    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36');
-    await page.setCookie(...cookies.map(c => ({
-      name: c.name, value: c.value,
-      domain: c.domain || 'vulms.vu.edu.pk', path: c.path || '/',
-    })));
-
-    // We need to be on the CourseHome page first, then click the lesson
-    // Navigate to the course page (we need the course event target)
-    // For now, navigate to dashboard first
+    // Navigate to dashboard first
     await page.goto(`${VULMS_BASE}/Home.aspx`, { waitUntil: 'networkidle2', timeout: 45000 });
 
-    // Click the lesson using postback
-    console.log('[VULMS Content] Opening lesson:', lessonEventTarget);
-    await page.evaluate((target) => {
-      (window as Record<string, unknown>).__doPostBack(target, '');
-    }, lessonEventTarget);
+    // Check if this is a direct URL or an eventTarget
+    if (lessonEventTarget.startsWith('http')) {
+      await page.goto(lessonEventTarget, { waitUntil: 'networkidle2', timeout: 45000 });
+    } else {
+      // It's an eventTarget - need to navigate to course page first
+      // But we don't know the course eventTarget... We need it passed separately
+      // For now, try direct postback from dashboard
+      console.log('[VULMS Content] Opening lesson:', lessonEventTarget);
+      await page.evaluate((target) => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (window as any).__doPostBack(target, '');
+      }, lessonEventTarget);
 
-    await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 }).catch(() => {});
+      await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 }).catch(() => {});
+    }
 
     // Extract content from the lesson page
     const content = await page.evaluate(() => {
@@ -430,6 +1348,9 @@ export async function downloadHandoutContent(
         '#ContentPlaceHolder1',
         'main',
         '.portlet-body',
+        '.lesson-content',
+        '#divLessonContent',
+        '.m-section__content',
       ];
 
       for (const sel of selectors) {
@@ -448,5 +1369,47 @@ export async function downloadHandoutContent(
     await browser.close().catch(() => {});
     console.error('[VULMS Content] Error:', error instanceof Error ? error.message : error);
     return 'Failed to load content. Please try again.';
+  }
+}
+
+// ─── DEBUG: DUMP PAGE HTML ────────────────────────────────────────────────────
+// Utility function to dump page HTML for debugging selectors
+
+export async function debugDumpPage(
+  cookies: Array<{ name: string; value: string; domain?: string; path?: string }>,
+  url: string
+) {
+  const puppeteerModule = await getPuppeteer();
+  if (!puppeteerModule) return { html: '', links: [], text: '' };
+
+  const { browser, page } = await createBrowserPage(cookies);
+
+  try {
+    await page.goto(url, { waitUntil: 'networkidle2', timeout: 45000 });
+
+    const data = await page.evaluate(() => {
+      const links: Array<{ text: string; href: string; id: string }> = [];
+      document.querySelectorAll('a').forEach((el) => {
+        const link = el as HTMLAnchorElement;
+        links.push({
+          text: link.textContent?.trim().substring(0, 100) || '',
+          href: link.getAttribute('href') || '',
+          id: link.id || '',
+        });
+      });
+
+      return {
+        html: document.body.innerHTML.substring(0, 10000),
+        links,
+        text: document.body.innerText.substring(0, 5000),
+      };
+    });
+
+    await browser.close();
+    return data;
+  } catch (error) {
+    await browser.close().catch(() => {});
+    console.error('[VULMS Debug] Error:', error instanceof Error ? error.message : error);
+    return { html: '', links: [], text: '' };
   }
 }
