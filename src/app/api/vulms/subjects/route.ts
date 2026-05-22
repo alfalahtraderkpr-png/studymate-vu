@@ -43,6 +43,7 @@ export async function POST(request: NextRequest) {
   } catch (error) {
     const message =
       error instanceof Error ? error.message : 'Failed to fetch subjects';
+    console.error('[VULMS Subjects] Error:', message);
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }

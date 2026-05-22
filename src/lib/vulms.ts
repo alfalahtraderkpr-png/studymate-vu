@@ -1,9 +1,8 @@
 // VULMS automation library
-// Uses puppeteer-core + @sparticuz/chromium on Vercel
-// Uses puppeteer-core + local Chrome on development
+// Uses direct HTTP requests (NO Puppeteer) — works on Vercel serverless!
+// VULMS is ASP.NET WebForms — we simulate form submissions with fetch
 
-import puppeteer from 'puppeteer-core';
-import type { Browser, Page } from 'puppeteer-core';
+import * as cheerio from 'cheerio';
 
 const VULMS_BASE = 'https://vulms.vu.edu.pk';
 const VULMS_LOGIN = 'https://vulms.vu.edu.pk/';
@@ -31,311 +30,519 @@ export interface HandoutInfo {
   type: string;
 }
 
-const BROWSER_ARGS = [
-  '--no-sandbox',
-  '--disable-setuid-sandbox',
-  '--disable-dev-shm-usage',
-  '--disable-gpu',
-  '--window-size=1280,720',
-  '--disable-blink-features=AutomationControlled',
-];
+// Cookie jar for managing session cookies across requests
+class CookieJar {
+  private cookies: Map<string, VULMSCookie> = new Map();
 
-// Check if running on Vercel serverless
-const isVercel = process.env.VERCEL === '1';
-
-async function launchBrowser(): Promise<Browser> {
-  if (isVercel) {
-    // On Vercel serverless — use @sparticuz/chromium
-    const chromium = await import('@sparticuz/chromium');
-    
-    const browser = await puppeteer.launch({
-      args: [...chromium.default.args, ...BROWSER_ARGS],
-      defaultViewport: chromium.default.defaultViewport,
-      executablePath: await chromium.default.executablePath(),
-      headless: chromium.default.headless,
-      ignoreHTTPSErrors: true,
-    });
-    return browser;
-  }
-
-  // Local development — use system Chrome/Chromium
-  // Try common paths for Chrome
-  const executablePath = getLocalChromePath();
-  
-  const browser = await puppeteer.launch({
-    headless: true,
-    executablePath,
-    args: BROWSER_ARGS,
-  });
-  return browser;
-}
-
-function getLocalChromePath(): string {
-  const platform = process.platform;
-  
-  if (platform === 'linux') {
-    // Common Linux Chrome paths
-    const paths = [
-      '/usr/bin/google-chrome',
-      '/usr/bin/chromium-browser',
-      '/usr/bin/chromium',
-      '/snap/bin/chromium',
-    ];
-    const fs = require('fs');
-    for (const p of paths) {
-      try { if (fs.existsSync(p)) return p; } catch {}
+  addFromSetCookie(setCookieHeaders: string[], domain: string) {
+    if (!setCookieHeaders) return;
+    for (const header of setCookieHeaders) {
+      const parts = header.split(';')[0].split('=');
+      if (parts.length >= 2) {
+        const name = parts[0].trim();
+        const value = parts.slice(1).join('=').trim();
+        this.cookies.set(name, {
+          name,
+          value,
+          domain,
+          path: '/',
+          expires: 0,
+          httpOnly: false,
+          secure: false,
+          sameSite: 'Lax',
+        });
+      }
     }
-  } else if (platform === 'darwin') {
-    return '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
-  } else if (platform === 'win32') {
-    return 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
   }
-  
-  // Fallback — let puppeteer-core figure it out
-  return '/usr/bin/google-chrome-stable';
+
+  addFromRawCookies(rawCookies: string[], domain: string) {
+    if (!rawCookies) return;
+    for (const raw of rawCookies) {
+      const parts = raw.split(';')[0].split('=');
+      if (parts.length >= 2) {
+        const name = parts[0].trim();
+        const value = parts.slice(1).join('=').trim();
+        this.cookies.set(name, {
+          name,
+          value,
+          domain,
+          path: '/',
+          expires: 0,
+          httpOnly: false,
+          secure: false,
+          sameSite: 'Lax',
+        });
+      }
+    }
+  }
+
+  addCookies(cookies: Array<{ name: string; value: string; domain?: string; path?: string }>) {
+    for (const c of cookies) {
+      this.cookies.set(c.name, {
+        name: c.name,
+        value: c.value,
+        domain: c.domain || 'vulms.vu.edu.pk',
+        path: c.path || '/',
+        expires: 0,
+        httpOnly: false,
+        secure: false,
+        sameSite: 'Lax',
+      });
+    }
+  }
+
+  toString(): string {
+    return Array.from(this.cookies.values())
+      .map((c) => `${c.name}=${c.value}`)
+      .join('; ');
+  }
+
+  toArray(): Array<{ name: string; value: string; domain: string; path: string }> {
+    return Array.from(this.cookies.values()).map((c) => ({
+      name: c.name,
+      value: c.value,
+      domain: c.domain,
+      path: c.path,
+    }));
+  }
+
+  get length(): number {
+    return this.cookies.size;
+  }
 }
 
-function addStealthScripts(page: Page) {
-  page.evaluateOnNewDocument(() => {
-    Object.defineProperty(navigator, 'webdriver', { get: () => false });
-    Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
-    Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en', 'ur'] });
-    (window as Record<string, unknown>).chrome = { runtime: {} };
-  });
+// Parse ASP.NET hidden fields from login page HTML
+function parseAspNetFields(html: string) {
+  const $ = cheerio.load(html);
+
+  const viewstate = $('input[name="__VIEWSTATE"]').val() || '';
+  const viewstategenerator = $('input[name="__VIEWSTATEGENERATOR"]').val() || '';
+  const eventvalidation = $('input[name="__EVENTVALIDATION"]').val() || '';
+
+  return { viewstate, viewstategenerator, eventvalidation };
 }
 
-function randomDelay(min: number, max: number): Promise<void> {
-  const delay = min + Math.random() * (max - min);
-  return new Promise((resolve) => setTimeout(resolve, delay));
-}
-
+// Main login function — uses direct HTTP requests
 export async function loginToVULMS(studentId: string, password: string) {
-  const browser = await launchBrowser();
-  const page = await browser.newPage();
-  addStealthScripts(page);
+  const jar = new CookieJar();
 
-  try {
-    await page.setViewport({ width: 1280, height: 720 });
-    await page.setUserAgent(
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-    );
+  // Step 1: GET the login page to obtain ASP.NET hidden fields
+  console.log('[VULMS] Step 1: Fetching login page...');
+  const loginPageRes = await fetch(VULMS_LOGIN, {
+    method: 'GET',
+    headers: {
+      'User-Agent':
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      Accept:
+        'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+      'Accept-Language': 'en-US,en;q=0.9,ur;q=0.8',
+      'Accept-Encoding': 'gzip, deflate, br',
+      Connection: 'keep-alive',
+      'Upgrade-Insecure-Requests': '1',
+    },
+    redirect: 'manual',
+  });
 
-    // Navigate to VULMS login page
-    await page.goto(VULMS_LOGIN, { waitUntil: 'networkidle2', timeout: 45000 });
+  // Collect initial cookies
+  const setCookies = loginPageRes.headers.getSetCookie?.() || [];
+  jar.addFromSetCookie(setCookies, 'vulms.vu.edu.pk');
 
-    // Wait for login form — ASP.NET WebForms selectors
-    await page.waitForSelector('#txtStudentID', { timeout: 15000 });
+  const loginHtml = await loginPageRes.text();
+  console.log('[VULMS] Login page status:', loginPageRes.status);
+  console.log('[VULMS] Cookies after GET:', jar.length);
 
-    await randomDelay(500, 1500);
+  // Step 2: Parse ASP.NET hidden fields
+  const aspFields = parseAspNetFields(loginHtml);
+  console.log('[VULMS] Parsed ASP.NET fields, VIEWSTATE length:', aspFields.viewstate.length);
 
-    // Fill Student ID
-    await page.click('#txtStudentID', { clickCount: 3 });
-    await page.type('#txtStudentID', studentId, { delay: 40 + Math.random() * 60 });
+  // Step 3: POST the login form
+  console.log('[VULMS] Step 2: Submitting login form...');
+  const loginBody = new URLSearchParams();
+  loginBody.append('__VIEWSTATE', aspFields.viewstate);
+  loginBody.append('__VIEWSTATEGENERATOR', aspFields.viewstategenerator);
+  loginBody.append('__EVENTVALIDATION', aspFields.eventvalidation);
+  loginBody.append('txtStudentID', studentId);
+  loginBody.append('txtPassword', password);
+  // Image button coordinates (simulates clicking the login button)
+  loginBody.append('ibtnLogin.x', '0');
+  loginBody.append('ibtnLogin.y', '0');
 
-    await randomDelay(300, 800);
+  const loginPostRes = await fetch(VULMS_LOGIN, {
+    method: 'POST',
+    headers: {
+      'User-Agent':
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      Accept:
+        'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+      'Accept-Language': 'en-US,en;q=0.9,ur;q=0.8',
+      'Content-Type': 'application/x-www-form-urlencoded',
+      Referer: VULMS_LOGIN,
+      Cookie: jar.toString(),
+      Connection: 'keep-alive',
+      'Upgrade-Insecure-Requests': '1',
+    },
+    body: loginBody.toString(),
+    redirect: 'manual',
+  });
 
-    // Fill Password
-    await page.click('#txtPassword', { clickCount: 3 });
-    await page.type('#txtPassword', password, { delay: 40 + Math.random() * 60 });
+  // Collect cookies from POST response
+  const postSetCookies = loginPostRes.headers.getSetCookie?.() || [];
+  jar.addFromSetCookie(postSetCookies, 'vulms.vu.edu.pk');
+  console.log('[VULMS] POST status:', loginPostRes.status);
+  console.log('[VULMS] Cookies after POST:', jar.length);
 
-    await randomDelay(500, 1200);
+  // Step 4: Follow redirects to complete login
+  let currentUrl = VULMS_LOGIN;
+  let currentRes: Response = loginPostRes;
+  let redirectCount = 0;
+  const maxRedirects = 10;
 
-    // Wait for reCAPTCHA v3 (invisible — auto-fills in background)
-    await page.waitForFunction(
-      () => {
-        const recaptchaField = document.querySelector('#g-recaptcha-response') as HTMLTextAreaElement;
-        return recaptchaField && recaptchaField.value && recaptchaField.value.length > 10;
+  while ([301, 302, 303, 307, 308].includes(currentRes.status) && redirectCount < maxRedirects) {
+    const location = currentRes.headers.get('location');
+    if (!location) break;
+
+    const nextUrl = location.startsWith('http') ? location : new URL(location, VULMS_BASE).href;
+    console.log(`[VULMS] Redirect ${redirectCount + 1}: ${nextUrl}`);
+
+    // Collect cookies from redirect responses
+    const redirectCookies = currentRes.headers.getSetCookie?.() || [];
+    jar.addFromSetCookie(redirectCookies, 'vulms.vu.edu.pk');
+
+    currentRes = await fetch(nextUrl, {
+      method: 'GET',
+      headers: {
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        Accept:
+          'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9,ur;q=0.8',
+        Referer: currentUrl,
+        Cookie: jar.toString(),
       },
-      { timeout: 15000 }
-    ).catch(() => {
-      console.log('reCAPTCHA token not found, proceeding without it');
+      redirect: 'manual',
     });
 
-    await randomDelay(500, 1000);
+    // Collect cookies from each redirect response
+    const newCookies = currentRes.headers.getSetCookie?.() || [];
+    jar.addFromSetCookie(newCookies, 'vulms.vu.edu.pk');
 
-    // Click Sign In button
-    await Promise.all([
-      page.click('#ibtnLogin'),
-      page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 }),
-    ]).catch(async () => {
-      // Fallback: submit form via JS
-      await page.evaluate(() => {
-        const form = document.querySelector('#ctl00') as HTMLFormElement;
-        if (form) form.submit();
-      });
-      await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 }).catch(() => {});
-    });
-
-    // Check if login was successful
-    const loginFormVisible = await page.evaluate(() => {
-      const usernameField = document.querySelector('#txtStudentID') as HTMLInputElement;
-      return usernameField && usernameField.offsetParent !== null;
-    });
-
-    if (loginFormVisible) {
-      const errorMsg = await page.evaluate(() => {
-        const errEl = document.querySelector('.alert-danger, .error, .login-error, .m-alert');
-        return errEl ? errEl.textContent?.trim() : '';
-      });
-      await browser.close();
-      throw new Error(errorMsg || 'Login failed. Please check your Student ID and Password. Make sure your VULMS account is active.');
-    }
-
-    // Get cookies
-    const cookies = await page.cookies();
-
-    // Get subjects from dashboard
-    const subjects = await scrapeSubjects(page);
-
-    return { success: true, cookies, subjects, browser };
-  } catch (error) {
-    await browser.close();
-    throw error;
+    currentUrl = nextUrl;
+    redirectCount++;
   }
+
+  // Step 5: Check if login was successful
+  console.log('[VULMS] Final status:', currentRes.status);
+  console.log('[VULMS] Final URL:', currentUrl);
+  console.log('[VULMS] Total cookies:', jar.length);
+
+  const finalHtml = await currentRes.text();
+
+  // Check if we're still on the login page (login failed)
+  const isLoginPage =
+    currentUrl.includes('Login') ||
+    currentUrl.includes('login') ||
+    currentUrl === VULMS_LOGIN ||
+    finalHtml.includes('txtStudentID');
+
+  if (isLoginPage && !currentUrl.includes('LMS') && !currentUrl.includes('Home')) {
+    // Try to find error message in the HTML
+    const $ = cheerio.load(finalHtml);
+    const errorMsg =
+      $('.alert-danger, .m-alert--danger, .error-message, .login-error').text().trim() ||
+      $('#lblMessage').text().trim() ||
+      $('.validation-summary-errors').text().trim() ||
+      '';
+
+    throw new Error(
+      errorMsg || 'Login failed. Please check your Student ID and Password. Make sure your VULMS account is active.'
+    );
+  }
+
+  // Step 6: If we're on the dashboard/LMS page, scrape subjects
+  let dashboardHtml = finalHtml;
+  let dashboardUrl = currentUrl;
+
+  // If we're not already on the dashboard, navigate there
+  if (!dashboardUrl.includes('LMS_LandingPage') && !dashboardUrl.includes('StudentHome')) {
+    console.log('[VULMS] Step 3: Navigating to dashboard...');
+    const dashboardRes = await fetch(`${VULMS_BASE}/LMS/LMS_LandingPage.aspx`, {
+      method: 'GET',
+      headers: {
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        Cookie: jar.toString(),
+      },
+      redirect: 'follow',
+    });
+    dashboardHtml = await dashboardRes.text();
+    dashboardUrl = dashboardRes.url;
+    console.log('[VULMS] Dashboard URL:', dashboardUrl);
+  }
+
+  // Step 7: Scrape subjects from the dashboard
+  const subjects = scrapeSubjectsFromHtml(dashboardHtml, dashboardUrl);
+  console.log('[VULMS] Found subjects:', subjects.length);
+
+  const cookies = jar.toArray();
+  return { success: true, cookies, subjects, browser: null };
 }
 
-async function scrapeSubjects(page: Page): Promise<SubjectInfo[]> {
-  try {
-    await randomDelay(1000, 2000);
+function scrapeSubjectsFromHtml(html: string, pageUrl: string): SubjectInfo[] {
+  const $ = cheerio.load(html);
+  const results: SubjectInfo[] = [];
+  const seen = new Set<string>();
 
-    const subjects = await page.evaluate(() => {
-      const results: Array<{ name: string; code: string; url: string }> = [];
+  // Strategy 1: Find course links on dashboard
+  const courseSelectors = [
+    'a[href*="CourseHome"]',
+    'a[href*="coursehome"]',
+    'a[href*="StudentHome"]',
+    'a[href*="studenthome"]',
+    'a[href*="Home.aspx"]',
+    'a[href*="home.aspx"]',
+    '.m-portlet a[href*="Home"]',
+    '.course-card a',
+    '.subject-card a',
+    '.portlet-body a[href*="Course"]',
+    '#ContentPlaceHolder1 a[href*="Course"]',
+    'a[href*="CourseDetail"]',
+  ];
 
-      // Strategy 1: Course links on dashboard
-      const courseLinks = document.querySelectorAll(
-        'a[href*="CourseHome"], a[href*="coursehome"], a[href*="StudentHome"], a[href*="studenthome"], ' +
-        '.m-portlet a[href*="Home"], .course-card a, .subject-card a, ' +
-        'a[href*="Home.aspx"], a[href*="home.aspx"]'
-      );
-      courseLinks.forEach((el) => {
-        const link = el as HTMLAnchorElement;
-        const text = link.textContent?.trim() || '';
-        const href = link.getAttribute('href') || '';
-        if (text && href) results.push({ name: text, code: '', url: href });
-      });
+  for (const selector of courseSelectors) {
+    $(selector).each((_i, el) => {
+      const $el = $(el);
+      const text = $el.text().trim();
+      let href = $el.attr('href') || '';
 
-      // Strategy 2: Find VU subject codes (CS101, MTH301, etc.)
-      if (results.length === 0) {
-        document.querySelectorAll('a[href]').forEach((el) => {
-          const link = el as HTMLAnchorElement;
-          const text = link.textContent?.trim() || '';
-          const href = link.getAttribute('href') || '';
-          const codeMatch = text.match(/([A-Z]{2,4}\d{3})/i);
-          if (codeMatch && href && !href.includes('javascript') && !href.includes('#')) {
-            results.push({
-              name: text,
-              code: codeMatch[1].toUpperCase(),
-              url: href.startsWith('http') ? href : new URL(href, window.location.origin).href,
-            });
+      if (text && href && !href.includes('javascript') && !href.includes('#')) {
+        // Make URL absolute
+        if (!href.startsWith('http')) {
+          try {
+            href = new URL(href, VULMS_BASE).href;
+          } catch {
+            return;
           }
-        });
+        }
+
+        // Extract subject code from text
+        const codeMatch = text.match(/([A-Z]{2,4}\d{3})/i);
+        const code = codeMatch ? codeMatch[1].toUpperCase() : '';
+
+        const key = code || text.substring(0, 50);
+        if (!seen.has(key)) {
+          seen.add(key);
+          results.push({
+            name: text.replace(/\s+/g, ' ').trim(),
+            code: code || text.split(/\s+/)[0].toUpperCase(),
+            url: href,
+          });
+        }
+      }
+    });
+
+    if (results.length > 0) break; // Stop if we found subjects with this selector
+  }
+
+  // Strategy 2: Look for VU subject code patterns in all links
+  if (results.length === 0) {
+    $('a[href]').each((_i, el) => {
+      const $el = $(el);
+      const text = $el.text().trim();
+      let href = $el.attr('href') || '';
+
+      if (!href || href.includes('javascript') || href.includes('#')) return;
+
+      const codeMatch = text.match(/([A-Z]{2,4}\d{3})/i);
+      if (codeMatch) {
+        if (!href.startsWith('http')) {
+          try {
+            href = new URL(href, VULMS_BASE).href;
+          } catch {
+            return;
+          }
+        }
+        const code = codeMatch[1].toUpperCase();
+        if (!seen.has(code)) {
+          seen.add(code);
+          results.push({ name: text.replace(/\s+/g, ' ').trim(), code, url: href });
+        }
+      }
+    });
+  }
+
+  // Strategy 3: Look for semester/course list tables
+  if (results.length === 0) {
+    $('table tr td a, .table tr td a, ul li a').each((_i, el) => {
+      const $el = $(el);
+      const text = $el.text().trim();
+      let href = $el.attr('href') || '';
+
+      if (!text || !href || href.includes('javascript') || href.includes('#')) return;
+
+      if (!href.startsWith('http')) {
+        try {
+          href = new URL(href, VULMS_BASE).href;
+        } catch {
+          return;
+        }
       }
 
-      // Deduplicate
-      const seen = new Set<string>();
-      return results.filter((r) => {
-        const key = r.code || r.name;
-        if (seen.has(key)) return false;
+      const key = text.substring(0, 50);
+      if (!seen.has(key)) {
         seen.add(key);
-        return true;
-      });
-    });
-
-    return subjects.map((s) => {
-      if (!s.code) {
-        const codeMatch = s.name.match(/^([A-Z]{2,4}\d{3})/i);
-        s.code = codeMatch ? codeMatch[1].toUpperCase() : s.name.split(/\s+/)[0] || 'UNKNOWN';
-      }
-      return s;
-    });
-  } catch {
-    return [];
-  }
-}
-
-export async function getSubjects(cookies: VULMSCookie[], existingBrowser?: Browser) {
-  let browser = existingBrowser;
-  let ownBrowser = false;
-
-  if (!browser) {
-    browser = await launchBrowser();
-    ownBrowser = true;
-  }
-
-  const page = await browser.newPage();
-  addStealthScripts(page);
-  await page.setCookie(...cookies);
-
-  try {
-    await page.goto(`${VULMS_BASE}/LMS/LMS_LandingPage.aspx`, { waitUntil: 'networkidle2', timeout: 30000 });
-    const subjects = await scrapeSubjects(page);
-    return subjects;
-  } finally {
-    await page.close();
-    if (ownBrowser && browser) await browser.close();
-  }
-}
-
-export async function getHandouts(cookies: VULMSCookie[], courseUrl: string) {
-  const browser = await launchBrowser();
-  const page = await browser.newPage();
-  addStealthScripts(page);
-  await page.setCookie(...cookies);
-
-  try {
-    await page.goto(courseUrl, { waitUntil: 'networkidle2', timeout: 30000 });
-    await randomDelay(1000, 2000);
-
-    const handouts = await page.evaluate(() => {
-      const results: Array<{ name: string; url: string; type: string }> = [];
-      const selectors = [
-        'a[href*="Handout"]', 'a[href*="handout"]', 'a[href*="Lecture"]', 'a[href*="lecture"]',
-        'a[href*="Content"]', 'a[href*="Resource"]', 'a[href*="Download"]', 'a[href*=".pdf"]',
-        'a[href*=".pptx"]', 'a[href*="Lesson"]',
-      ];
-
-      selectors.forEach((sel) => {
-        document.querySelectorAll(sel).forEach((el) => {
-          const link = el as HTMLAnchorElement;
-          const text = link.textContent?.trim() || '';
-          const href = link.getAttribute('href') || '';
-          if (text && href && !href.includes('javascript')) {
-            const fullUrl = href.startsWith('http') ? href : new URL(href, window.location.origin).href;
-            const type = href.toLowerCase().includes('.pdf') ? 'pdf' :
-                         href.toLowerCase().includes('.pptx') || href.toLowerCase().includes('.ppt') ? 'pptx' : 'document';
-            results.push({ name: text, url: fullUrl, type });
-          }
+        const codeMatch = text.match(/([A-Z]{2,4}\d{3})/i);
+        results.push({
+          name: text.replace(/\s+/g, ' ').trim(),
+          code: codeMatch ? codeMatch[1].toUpperCase() : text.split(/\s+/)[0].toUpperCase(),
+          url: href,
         });
-      });
-
-      const seen = new Set<string>();
-      return results.filter((r) => { if (seen.has(r.url)) return false; seen.add(r.url); return true; });
+      }
     });
-
-    return handouts;
-  } finally {
-    await browser.close();
   }
+
+  // Ensure all subjects have codes
+  return results.map((s) => {
+    if (!s.code || s.code.length < 2) {
+      const codeMatch = s.name.match(/([A-Z]{2,4}\d{3})/i);
+      s.code = codeMatch ? codeMatch[1].toUpperCase() : s.name.split(/\s+/)[0].toUpperCase();
+    }
+    return s;
+  });
 }
 
-export async function downloadHandoutContent(cookies: VULMSCookie[], handoutUrl: string) {
-  const browser = await launchBrowser();
-  const page = await browser.newPage();
-  addStealthScripts(page);
-  await page.setCookie(...cookies);
+export async function getSubjects(cookies: Array<{ name: string; value: string; domain?: string; path?: string }>) {
+  const jar = new CookieJar();
+  jar.addCookies(cookies);
 
-  try {
-    await page.goto(handoutUrl, { waitUntil: 'networkidle2', timeout: 30000 });
-    const content = await page.evaluate(() => {
-      const mainContent =
-        document.querySelector('#region-main') ||
-        document.querySelector('.m-portlet__body') ||
-        document.querySelector('main') ||
-        document.body;
-      return mainContent?.innerText || '';
+  const res = await fetch(`${VULMS_BASE}/LMS/LMS_LandingPage.aspx`, {
+    method: 'GET',
+    headers: {
+      'User-Agent':
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      Cookie: jar.toString(),
+    },
+    redirect: 'follow',
+  });
+
+  const html = await res.text();
+  return scrapeSubjectsFromHtml(html, res.url);
+}
+
+export async function getHandouts(
+  cookies: Array<{ name: string; value: string; domain?: string; path?: string }>,
+  courseUrl: string
+) {
+  const jar = new CookieJar();
+  jar.addCookies(cookies);
+
+  const res = await fetch(courseUrl, {
+    method: 'GET',
+    headers: {
+      'User-Agent':
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      Cookie: jar.toString(),
+    },
+    redirect: 'follow',
+  });
+
+  const html = await res.text();
+  const $ = cheerio.load(html);
+  const results: HandoutInfo[] = [];
+  const seen = new Set<string>();
+
+  const handoutSelectors = [
+    'a[href*="Handout"]',
+    'a[href*="handout"]',
+    'a[href*="Lecture"]',
+    'a[href*="lecture"]',
+    'a[href*="Content"]',
+    'a[href*="Resource"]',
+    'a[href*="Download"]',
+    'a[href*=".pdf"]',
+    'a[href*=".pptx"]',
+    'a[href*="Lesson"]',
+    'a[href*="CourseContent"]',
+    'a[href*="StudyMaterial"]',
+  ];
+
+  for (const selector of handoutSelectors) {
+    $(selector).each((_i, el) => {
+      const $el = $(el);
+      const text = $el.text().trim();
+      let href = $el.attr('href') || '';
+
+      if (!text || !href || href.includes('javascript') || href.includes('#')) return;
+
+      if (!href.startsWith('http')) {
+        try {
+          href = new URL(href, VULMS_BASE).href;
+        } catch {
+          return;
+        }
+      }
+
+      if (seen.has(href)) return;
+      seen.add(href);
+
+      const type = href.toLowerCase().includes('.pdf')
+        ? 'pdf'
+        : href.toLowerCase().includes('.pptx') || href.toLowerCase().includes('.ppt')
+          ? 'pptx'
+          : 'document';
+
+      results.push({ name: text.replace(/\s+/g, ' ').trim(), url: href, type });
     });
-    return content;
-  } finally {
-    await browser.close();
   }
+
+  return results;
+}
+
+export async function downloadHandoutContent(
+  cookies: Array<{ name: string; value: string; domain?: string; path?: string }>,
+  handoutUrl: string
+) {
+  const jar = new CookieJar();
+  jar.addCookies(cookies);
+
+  const res = await fetch(handoutUrl, {
+    method: 'GET',
+    headers: {
+      'User-Agent':
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      Cookie: jar.toString(),
+    },
+    redirect: 'follow',
+  });
+
+  const contentType = res.headers.get('content-type') || '';
+
+  // If it's a PDF or binary file, return the URL info instead of trying to parse
+  if (
+    contentType.includes('pdf') ||
+    contentType.includes('octet-stream') ||
+    contentType.includes('pptx') ||
+    contentType.includes('powerpoint')
+  ) {
+    return `[This is a downloadable file. URL: ${handoutUrl}]\n\nTo study this content, please download the file from VULMS directly.`;
+  }
+
+  // If it's HTML, parse it
+  const html = await res.text();
+  const $ = cheerio.load(html);
+
+  // Try to extract main content from common ASP.NET/VULMS layouts
+  const mainContent =
+    $('#region-main').text().trim() ||
+    $('.m-portlet__body').text().trim() ||
+    $('#ContentPlaceHolder1').text().trim() ||
+    $('#main-content').text().trim() ||
+    $('main').text().trim() ||
+    $('.content-area').text().trim() ||
+    $('body').text().trim();
+
+  return mainContent.replace(/\s+/g, ' ').trim();
 }

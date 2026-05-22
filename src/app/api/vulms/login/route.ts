@@ -14,14 +14,15 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Login to VULMS using Puppeteer
-    const { cookies, subjects, browser } = await loginToVULMS(studentId, password);
+    console.log(`[VULMS Login] Attempting login for: ${studentId}`);
 
-    // Close browser after we're done
-    try { await browser.close(); } catch {}
+    // Login to VULMS using direct HTTP requests (no Puppeteer!)
+    const { cookies, subjects } = await loginToVULMS(studentId, password);
+
+    console.log(`[VULMS Login] Success! Found ${subjects.length} subjects`);
 
     // Format cookies for client-side storage
-    const formattedCookies = cookies.map((c: Record<string, unknown>) => ({
+    const formattedCookies = cookies.map((c) => ({
       name: c.name,
       value: c.value,
       domain: c.domain,
@@ -36,6 +37,7 @@ export async function POST(request: NextRequest) {
   } catch (error) {
     const message =
       error instanceof Error ? error.message : 'Login failed. Please try again.';
+    console.error('[VULMS Login] Error:', message);
     return NextResponse.json({ error: message }, { status: 401 });
   }
 }

@@ -17,14 +17,13 @@ export async function POST(request: NextRequest) {
     // Extract a title from the URL or content
     const urlParts = handoutUrl.split('/');
     const title =
-      urlParts[urlParts.length - 1] ||
-      urlParts[urlParts.length - 2] ||
-      'Handout';
+      decodeURIComponent(urlParts[urlParts.length - 1] || urlParts[urlParts.length - 2] || 'Handout');
 
     return NextResponse.json({ content, title });
   } catch (error) {
     const message =
       error instanceof Error ? error.message : 'Failed to fetch handout';
+    console.error('[VULMS Handout] Error:', message);
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }
