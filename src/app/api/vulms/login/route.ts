@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { loginToVULMS, getSubjects } from '@/lib/vulms';
-import { db } from '@/lib/db';
+import { loginToVULMS } from '@/lib/vulms';
+
+export const maxDuration = 60; // Allow up to 60 seconds for login
 
 export async function POST(request: NextRequest) {
   try {
@@ -13,41 +14,28 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Try to login to VULMS
-    const { cookies, browser } = await loginToVULMS(studentId, password);
+    // Login to VULMS using Puppeteer
+    const { cookies, subjects, browser } = await loginToVULMS(studentId, password);
 
-    // Get subjects list
-    const subjects = await getSubjects(cookies, browser);
+    // Close browser after we're done
+    try { await browser.close(); } catch {}
 
-    // Save session to database
-    const session = await db.studySession.create({
-      data: {
-        studentId,
-        cookies: JSON.stringify(cookies),
-      },
-    });
-
-    // Save subjects to database
-    for (const subject of subjects) {
-      await db.subject.create({
-        data: {
-          sessionId: session.id,
-          name: subject.name,
-          code: subject.code,
-          handouts: JSON.stringify([]),
-        },
-      });
-    }
+    // Format cookies for client-side storage
+    const formattedCookies = cookies.map((c: Record<string, unknown>) => ({
+      name: c.name,
+      value: c.value,
+      domain: c.domain,
+      path: c.path,
+    }));
 
     return NextResponse.json({
       success: true,
-      sessionId: session.id,
-      cookies,
+      cookies: formattedCookies,
       subjects,
     });
   } catch (error) {
     const message =
-      error instanceof Error ? error.message : 'Login failed';
+      error instanceof Error ? error.message : 'Login failed. Please try again.';
     return NextResponse.json({ error: message }, { status: 401 });
   }
 }

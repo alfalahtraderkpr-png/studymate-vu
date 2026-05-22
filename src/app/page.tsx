@@ -122,12 +122,12 @@ function LoginView() {
         <Card className="shadow-xl border-emerald-200 dark:border-emerald-800/50">
           <CardHeader>
             <CardTitle className="text-xl">Login to VULMS</CardTitle>
-            <CardDescription>Enter your Virtual University LMS credentials</CardDescription>
+            <CardDescription>Enter your Virtual University LMS credentials to access your subjects</CardDescription>
           </CardHeader>
           <CardContent>
             <form onSubmit={handleLogin} className="space-y-4">
               <div className="space-y-2">
-                <Label htmlFor="studentId">Student ID</Label>
+                <Label htmlFor="studentId">Student ID (VU ID)</Label>
                 <Input
                   id="studentId"
                   placeholder="e.g. BC123456789"
@@ -169,13 +169,24 @@ function LoginView() {
                 {isLoggingIn ? (
                   <>
                     <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                    Logging in...
+                    Logging in to VULMS...
                   </>
                 ) : (
                   'Login to VULMS'
                 )}
               </Button>
             </form>
+
+            {/* Info Box */}
+            <div className="mt-4 p-3 rounded-lg bg-blue-50 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-800">
+              <p className="text-xs text-blue-700 dark:text-blue-400 font-medium mb-1">How it works:</p>
+              <ul className="text-xs text-blue-600 dark:text-blue-400 space-y-1">
+                <li>1. Enter your VULMS Student ID and Password</li>
+                <li>2. AI logs in (read-only) and loads your subjects</li>
+                <li>3. No activities performed on LMS - VU can&apos;t detect</li>
+                <li>4. Takes 15-30 seconds for first login</li>
+              </ul>
+            </div>
 
             <div className="relative my-6">
               <div className="absolute inset-0 flex items-center">
@@ -197,7 +208,7 @@ function LoginView() {
             </Button>
 
             <p className="text-xs text-muted-foreground text-center mt-4">
-              🔒 Read-only access. We never modify your VULMS data.
+              Read-only access. We never modify your VULMS data.
             </p>
           </CardContent>
         </Card>

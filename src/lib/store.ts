@@ -357,9 +357,11 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   // Actions
   login: async (studentId: string, password: string) => {
-    set({ isLoading: true, loadingMessage: 'Logging into VULMS...', view: 'loading' });
+    set({ isLoading: true, loadingMessage: 'Connecting to VULMS...', view: 'loading' });
 
     try {
+      set({ loadingMessage: 'Logging into VULMS (this may take 15-30 seconds)...' });
+
       const res = await fetch('/api/vulms/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -369,18 +371,24 @@ export const useAppStore = create<AppState>((set, get) => ({
       const data = await res.json();
 
       if (!res.ok) {
-        throw new Error(data.error || 'Login failed');
+        throw new Error(data.error || 'Login failed. Please check your credentials.');
       }
+
+      set({ loadingMessage: 'Loading your subjects...' });
+
+      const subjectsWithIds = (data.subjects || []).map(
+        (s: { name: string; code: string; url: string }, i: number) => ({
+          id: String(i + 1),
+          name: s.name,
+          code: s.code,
+          handouts: [] as HandoutInfo[],
+        })
+      );
 
       set({
         studentId,
         cookies: data.cookies,
-        subjects: data.subjects.map((s: { name: string; code: string; url: string }, i: number) => ({
-          id: String(i + 1),
-          name: s.name,
-          code: s.code,
-          handouts: [],
-        })),
+        subjects: subjectsWithIds,
         isAuthenticated: true,
         isLoading: false,
         view: 'dashboard',
@@ -388,15 +396,16 @@ export const useAppStore = create<AppState>((set, get) => ({
 
       // Fetch handouts for each subject in background
       const { cookies } = get();
-      for (let i = 0; i < data.subjects.length; i++) {
+      for (let i = 0; i < (data.subjects || []).length; i++) {
         try {
+          set({ loadingMessage: `Loading handouts for ${(data.subjects[i] as {name: string}).name}...` });
           const handoutRes = await fetch('/api/vulms/subjects', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ cookies, sessionUrl: data.subjects[i].url }),
+            body: JSON.stringify({ cookies, sessionUrl: (data.subjects[i] as {url: string}).url }),
           });
           const handoutData = await handoutRes.json();
-          if (handoutData.handouts) {
+          if (handoutData.handouts && handoutData.handouts.length > 0) {
             const { subjects } = get();
             const updatedSubjects = [...subjects];
             updatedSubjects[i] = {
@@ -412,6 +421,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     } catch (error) {
       set({
         isLoading: false,
+        loadingMessage: '',
         view: 'login',
       });
       throw error;
