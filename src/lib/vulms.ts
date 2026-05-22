@@ -55,27 +55,6 @@ class CookieJar {
     }
   }
 
-  addFromRawCookies(rawCookies: string[], domain: string) {
-    if (!rawCookies) return;
-    for (const raw of rawCookies) {
-      const parts = raw.split(';')[0].split('=');
-      if (parts.length >= 2) {
-        const name = parts[0].trim();
-        const value = parts.slice(1).join('=').trim();
-        this.cookies.set(name, {
-          name,
-          value,
-          domain,
-          path: '/',
-          expires: 0,
-          httpOnly: false,
-          secure: false,
-          sameSite: 'Lax',
-        });
-      }
-    }
-  }
-
   addCookies(cookies: Array<{ name: string; value: string; domain?: string; path?: string }>) {
     for (const c of cookies) {
       this.cookies.set(c.name, {
@@ -118,15 +97,16 @@ function parseAspNetFields(html: string) {
   const viewstate = $('input[name="__VIEWSTATE"]').val() || '';
   const viewstategenerator = $('input[name="__VIEWSTATEGENERATOR"]').val() || '';
   const eventvalidation = $('input[name="__EVENTVALIDATION"]').val() || '';
+  const actionField = $('input[name="action"]').val() || '';
 
-  return { viewstate, viewstategenerator, eventvalidation };
+  return { viewstate, viewstategenerator, eventvalidation, actionField };
 }
 
 // Main login function — uses direct HTTP requests
 export async function loginToVULMS(studentId: string, password: string) {
   const jar = new CookieJar();
 
-  // Step 1: GET the login page to obtain ASP.NET hidden fields
+  // Step 1: GET the login page to obtain ASP.NET hidden fields + session cookie
   console.log('[VULMS] Step 1: Fetching login page...');
   const loginPageRes = await fetch(VULMS_LOGIN, {
     method: 'GET',
@@ -136,26 +116,26 @@ export async function loginToVULMS(studentId: string, password: string) {
       Accept:
         'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
       'Accept-Language': 'en-US,en;q=0.9,ur;q=0.8',
-      'Accept-Encoding': 'gzip, deflate, br',
       Connection: 'keep-alive',
       'Upgrade-Insecure-Requests': '1',
     },
     redirect: 'manual',
   });
 
-  // Collect initial cookies
+  // Collect initial cookies (ASP.NET_SessionId + ARRAffinity)
   const setCookies = loginPageRes.headers.getSetCookie?.() || [];
   jar.addFromSetCookie(setCookies, 'vulms.vu.edu.pk');
 
   const loginHtml = await loginPageRes.text();
   console.log('[VULMS] Login page status:', loginPageRes.status);
-  console.log('[VULMS] Cookies after GET:', jar.length);
+  console.log('[VULMS] Cookies after GET:', jar.length, '- Session:', jar.toString().includes('SessionId'));
 
   // Step 2: Parse ASP.NET hidden fields
   const aspFields = parseAspNetFields(loginHtml);
-  console.log('[VULMS] Parsed ASP.NET fields, VIEWSTATE length:', aspFields.viewstate.length);
+  console.log('[VULMS] VIEWSTATE length:', aspFields.viewstate.length);
+  console.log('[VULMS] Action field:', aspFields.actionField);
 
-  // Step 3: POST the login form
+  // Step 3: POST the login form with ALL required fields
   console.log('[VULMS] Step 2: Submitting login form...');
   const loginBody = new URLSearchParams();
   loginBody.append('__VIEWSTATE', aspFields.viewstate);
@@ -163,9 +143,13 @@ export async function loginToVULMS(studentId: string, password: string) {
   loginBody.append('__EVENTVALIDATION', aspFields.eventvalidation);
   loginBody.append('txtStudentID', studentId);
   loginBody.append('txtPassword', password);
+  // VULMS hidden action field (beta_LMS)
+  loginBody.append('action', aspFields.actionField || 'beta_LMS');
+  // reCAPTCHA v3 token field (empty - VULMS doesn't strictly validate it)
+  loginBody.append('g-recaptcha-response', '');
   // Image button coordinates (simulates clicking the login button)
-  loginBody.append('ibtnLogin.x', '0');
-  loginBody.append('ibtnLogin.y', '0');
+  loginBody.append('ibtnLogin.x', '52');
+  loginBody.append('ibtnLogin.y', '18');
 
   const loginPostRes = await fetch(VULMS_LOGIN, {
     method: 'POST',
@@ -177,6 +161,7 @@ export async function loginToVULMS(studentId: string, password: string) {
       'Accept-Language': 'en-US,en;q=0.9,ur;q=0.8',
       'Content-Type': 'application/x-www-form-urlencoded',
       Referer: VULMS_LOGIN,
+      Origin: VULMS_BASE,
       Cookie: jar.toString(),
       Connection: 'keep-alive',
       'Upgrade-Insecure-Requests': '1',
@@ -191,7 +176,43 @@ export async function loginToVULMS(studentId: string, password: string) {
   console.log('[VULMS] POST status:', loginPostRes.status);
   console.log('[VULMS] Cookies after POST:', jar.length);
 
-  // Step 4: Follow redirects to complete login
+  // Step 4: Check POST response - could be redirect (success) or same page (failure)
+  if (loginPostRes.status === 200) {
+    // Same page returned - login failed
+    const postHtml = await loginPostRes.text();
+    const $ = cheerio.load(postHtml);
+
+    // VULMS shows error in #lblError
+    const errorMsg = $('#lblError').text().trim();
+
+    if (errorMsg) {
+      console.log('[VULMS] VULMS error:', errorMsg);
+      throw new Error(errorMsg);
+    }
+
+    // Check for other error patterns
+    const altError =
+      $('.alert-danger').text().trim() ||
+      $('.m-alert--danger').text().trim() ||
+      $('.validation-summary-errors').text().trim();
+
+    if (altError) {
+      console.log('[VULMS] Alt error:', altError);
+      throw new Error(altError);
+    }
+
+    // If still on login page with no specific error
+    if (postHtml.includes('txtStudentID')) {
+      throw new Error(
+        'Login failed. Please check your Student ID and Password. Make sure your VULMS account is active.'
+      );
+    }
+
+    // Maybe login succeeded but returned 200 (unusual for ASP.NET)
+    console.log('[VULMS] Got 200 but no login form - checking content...');
+  }
+
+  // Step 5: Follow redirects to complete login
   let currentUrl = VULMS_LOGIN;
   let currentRes: Response = loginPostRes;
   let redirectCount = 0;
@@ -204,7 +225,7 @@ export async function loginToVULMS(studentId: string, password: string) {
     const nextUrl = location.startsWith('http') ? location : new URL(location, VULMS_BASE).href;
     console.log(`[VULMS] Redirect ${redirectCount + 1}: ${nextUrl}`);
 
-    // Collect cookies from redirect responses
+    // Collect cookies from redirect response
     const redirectCookies = currentRes.headers.getSetCookie?.() || [];
     jar.addFromSetCookie(redirectCookies, 'vulms.vu.edu.pk');
 
@@ -213,8 +234,7 @@ export async function loginToVULMS(studentId: string, password: string) {
       headers: {
         'User-Agent':
           'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        Accept:
-          'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+        Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         'Accept-Language': 'en-US,en;q=0.9,ur;q=0.8',
         Referer: currentUrl,
         Cookie: jar.toString(),
@@ -230,40 +250,49 @@ export async function loginToVULMS(studentId: string, password: string) {
     redirectCount++;
   }
 
-  // Step 5: Check if login was successful
+  // Step 6: Get the final page content
   console.log('[VULMS] Final status:', currentRes.status);
   console.log('[VULMS] Final URL:', currentUrl);
   console.log('[VULMS] Total cookies:', jar.length);
 
-  const finalHtml = await currentRes.text();
+  let finalHtml: string;
 
-  // Check if we're still on the login page (login failed)
-  const isLoginPage =
-    currentUrl.includes('Login') ||
-    currentUrl.includes('login') ||
-    currentUrl === VULMS_LOGIN ||
-    finalHtml.includes('txtStudentID');
+  // If final response is a redirect, follow it
+  if ([301, 302, 303, 307, 308].includes(currentRes.status)) {
+    const location = currentRes.headers.get('location') || '';
+    const followUrl = location.startsWith('http') ? location : new URL(location, VULMS_BASE).href;
+    const followRes = await fetch(followUrl, {
+      method: 'GET',
+      headers: {
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        Cookie: jar.toString(),
+      },
+      redirect: 'follow',
+    });
+    finalHtml = await followRes.text();
+    currentUrl = followRes.url;
+  } else {
+    finalHtml = await currentRes.text();
+  }
 
-  if (isLoginPage && !currentUrl.includes('LMS') && !currentUrl.includes('Home')) {
-    // Try to find error message in the HTML
+  // Step 7: Check if we're still on the login page (login failed)
+  const isOnLoginPage = finalHtml.includes('txtStudentID') && finalHtml.includes('txtPassword');
+
+  if (isOnLoginPage) {
     const $ = cheerio.load(finalHtml);
-    const errorMsg =
-      $('.alert-danger, .m-alert--danger, .error-message, .login-error').text().trim() ||
-      $('#lblMessage').text().trim() ||
-      $('.validation-summary-errors').text().trim() ||
-      '';
-
+    const errorMsg = $('#lblError').text().trim();
     throw new Error(
-      errorMsg || 'Login failed. Please check your Student ID and Password. Make sure your VULMS account is active.'
+      errorMsg || 'Login failed. Please check your Student ID and Password.'
     );
   }
 
-  // Step 6: If we're on the dashboard/LMS page, scrape subjects
+  // Step 8: Navigate to dashboard if not already there
   let dashboardHtml = finalHtml;
   let dashboardUrl = currentUrl;
 
-  // If we're not already on the dashboard, navigate there
-  if (!dashboardUrl.includes('LMS_LandingPage') && !dashboardUrl.includes('StudentHome')) {
+  if (!dashboardUrl.toLowerCase().includes('lms') && !dashboardUrl.toLowerCase().includes('home')) {
     console.log('[VULMS] Step 3: Navigating to dashboard...');
     const dashboardRes = await fetch(`${VULMS_BASE}/LMS/LMS_LandingPage.aspx`, {
       method: 'GET',
@@ -278,9 +307,14 @@ export async function loginToVULMS(studentId: string, password: string) {
     dashboardHtml = await dashboardRes.text();
     dashboardUrl = dashboardRes.url;
     console.log('[VULMS] Dashboard URL:', dashboardUrl);
+
+    // Check if we got redirected back to login (session expired)
+    if (dashboardHtml.includes('txtStudentID')) {
+      throw new Error('Session expired. Please try logging in again.');
+    }
   }
 
-  // Step 7: Scrape subjects from the dashboard
+  // Step 9: Scrape subjects from the dashboard
   const subjects = scrapeSubjectsFromHtml(dashboardHtml, dashboardUrl);
   console.log('[VULMS] Found subjects:', subjects.length);
 
@@ -341,7 +375,7 @@ function scrapeSubjectsFromHtml(html: string, pageUrl: string): SubjectInfo[] {
       }
     });
 
-    if (results.length > 0) break; // Stop if we found subjects with this selector
+    if (results.length > 0) break;
   }
 
   // Strategy 2: Look for VU subject code patterns in all links
@@ -427,6 +461,12 @@ export async function getSubjects(cookies: Array<{ name: string; value: string; 
   });
 
   const html = await res.text();
+
+  // Check if redirected to login
+  if (html.includes('txtStudentID')) {
+    throw new Error('Session expired. Please login again.');
+  }
+
   return scrapeSubjectsFromHtml(html, res.url);
 }
 
@@ -449,6 +489,12 @@ export async function getHandouts(
   });
 
   const html = await res.text();
+
+  // Check if redirected to login
+  if (html.includes('txtStudentID')) {
+    throw new Error('Session expired. Please login again.');
+  }
+
   const $ = cheerio.load(html);
   const results: HandoutInfo[] = [];
   const seen = new Set<string>();
