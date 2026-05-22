@@ -360,12 +360,40 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({ isLoading: true, loadingMessage: 'Connecting to VULMS...', view: 'loading' });
 
     try {
-      set({ loadingMessage: 'Logging into VULMS (this may take 15-30 seconds)...' });
+      // Generate reCAPTCHA v3 token from the browser
+      set({ loadingMessage: 'Generating security token...' });
+      let recaptchaToken = '';
+      try {
+        const grecaptcha = (window as Record<string, unknown>).grecaptcha as {
+          execute: (sitekey: string, options: { action: string }) => Promise<string>;
+          ready: (cb: () => void) => void;
+        } | undefined;
+        if (grecaptcha && grecaptcha.execute) {
+          recaptchaToken = await new Promise<string>((resolve, reject) => {
+            grecaptcha.ready(async () => {
+              try {
+                const token = await grecaptcha.execute(
+                  '6LdSLNUUAAAAAAcFN7NNNDEH-DdQ5GyZQDlhTYjn',
+                  { action: 'LMS20LandingPage' }
+                );
+                resolve(token);
+              } catch {
+                reject(new Error('reCAPTCHA failed'));
+              }
+            });
+          });
+          console.log('[StudyMate] reCAPTCHA token generated, length:', recaptchaToken.length);
+        }
+      } catch (err) {
+        console.warn('[StudyMate] reCAPTCHA token generation failed:', err);
+      }
+
+      set({ loadingMessage: 'Logging into VULMS (this may take 10-20 seconds)...' });
 
       const res = await fetch('/api/vulms/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ studentId, password }),
+        body: JSON.stringify({ studentId, password, recaptchaToken }),
       });
 
       const data = await res.json();

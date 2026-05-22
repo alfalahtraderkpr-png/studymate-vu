@@ -5,7 +5,7 @@ export const maxDuration = 60; // Allow up to 60 seconds for login
 
 export async function POST(request: NextRequest) {
   try {
-    const { studentId, password } = await request.json();
+    const { studentId, password, recaptchaToken } = await request.json();
 
     if (!studentId || !password) {
       return NextResponse.json(
@@ -15,9 +15,10 @@ export async function POST(request: NextRequest) {
     }
 
     console.log(`[VULMS Login] Attempting login for: ${studentId}`);
+    console.log(`[VULMS Login] reCAPTCHA token received: ${recaptchaToken ? `yes (${recaptchaToken.length} chars)` : 'no'}`);
 
-    // Login to VULMS using direct HTTP requests (no Puppeteer!)
-    const { cookies, subjects } = await loginToVULMS(studentId, password);
+    // Login to VULMS using direct HTTP requests with reCAPTCHA token
+    const { cookies, subjects } = await loginToVULMS(studentId, password, recaptchaToken || '');
 
     console.log(`[VULMS Login] Success! Found ${subjects.length} subjects`);
 

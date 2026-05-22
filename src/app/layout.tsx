@@ -30,6 +30,14 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" suppressHydrationWarning>
+      <head>
+        {/* reCAPTCHA v3 — VULMS uses this sitekey for login */}
+        <script
+          src="https://www.google.com/recaptcha/api.js?render=6LdSLNUUAAAAAAcFN7NNNDEH-DdQ5GyZQDlhTYjn"
+          async
+          defer
+        />
+      </head>
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased bg-background text-foreground`}
       >
