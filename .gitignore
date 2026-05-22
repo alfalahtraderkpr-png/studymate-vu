@@ -52,3 +52,17 @@ prompt
 server.log
 # Skills directory
 /skills/.env
+# Container-specific files
+Caddyfile
+ensure-server.sh
+keep-alive.sh
+run.sh
+serve.js
+start-server.sh
+supervise-server.sh
+/dev.log
+/server.log
+/agent-ctx
+/mini-services
+/examples
+.zscripts
