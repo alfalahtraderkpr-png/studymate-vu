@@ -5,7 +5,7 @@ export const maxDuration = 120;
 
 export async function POST(request: NextRequest) {
   try {
-    const { cookies, courseEventTarget, subjectCode } = await request.json();
+    const { cookies, courseEventTarget, subjectCode, skipDetails } = await request.json();
 
     if (!cookies || !courseEventTarget) {
       return NextResponse.json(
@@ -14,7 +14,14 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const courseData = await getAllCourseData(cookies, courseEventTarget, subjectCode);
+    // skipDetails=true by default for fast initial load (just CourseHome data)
+    // skipDetails=false when user clicks into a subject for full details
+    const courseData = await getAllCourseData(
+      cookies,
+      courseEventTarget,
+      subjectCode,
+      skipDetails !== false // default to true (skip details for speed)
+    );
 
     return NextResponse.json({ courseData });
   } catch (error) {

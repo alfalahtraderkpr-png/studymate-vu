@@ -120,7 +120,46 @@ async function getPuppeteer() {
 function getChromePath(): string {
   if (process.env.PUPPETEER_EXECUTABLE_PATH) return process.env.PUPPETEER_EXECUTABLE_PATH;
   if (process.env.CHROME_PATH) return process.env.CHROME_PATH;
-  return '/usr/bin/chromium';
+
+  // Try Puppeteer's bundled Chrome locations
+  const path = require('path');
+  const fs = require('fs');
+
+  // Puppeteer 24.x stores Chrome in node_modules/puppeteer-core or .cache/puppeteer
+  const possiblePaths = [
+    path.join(process.cwd(), 'node_modules', 'puppeteer', '.local-chromium', 'linux-*', 'chrome-linux64', 'chrome'),
+    path.join(require('os').homedir(), '.cache', 'puppeteer', 'chrome', 'linux-*', 'chrome-linux64', 'chrome'),
+    '/usr/bin/chromium',
+    '/usr/bin/chromium-browser',
+    '/usr/bin/google-chrome',
+  ];
+
+  for (const p of possiblePaths) {
+    try {
+      // Handle glob patterns
+      if (p.includes('*')) {
+        const dir = path.dirname(p);
+        const base = path.basename(p);
+        const parentDir = path.dirname(dir);
+        if (fs.existsSync(parentDir)) {
+          const entries = fs.readdirSync(parentDir).sort().reverse(); // Latest version first
+          for (const entry of entries) {
+            const candidate = path.join(parentDir, entry, path.basename(path.dirname(p)), base);
+            if (fs.existsSync(candidate)) {
+              console.log('[VULMS] Found Chrome at:', candidate);
+              return candidate;
+            }
+          }
+        }
+      } else if (fs.existsSync(p)) {
+        console.log('[VULMS] Found Chrome at:', p);
+        return p;
+      }
+    } catch { /* ignore */ }
+  }
+
+  // Let Puppeteer find its own Chrome (default behavior)
+  return '';
 }
 
 const BROWSER_ARGS = [
@@ -145,12 +184,17 @@ async function createBrowserPage(cookies?: Array<{ name: string; value: string; 
   const puppeteer = puppeteerModule;
   const executablePath = getChromePath();
 
-  const browser = await puppeteer.default.launch({
+  const launchOptions: Record<string, unknown> = {
     headless: true,
-    executablePath,
     args: BROWSER_ARGS,
     ignoreDefaultArgs: ['--disable-extensions'],
-  });
+  };
+  // Only set executablePath if we found one; otherwise let Puppeteer use its bundled Chrome
+  if (executablePath) {
+    launchOptions.executablePath = executablePath;
+  }
+
+  const browser = await puppeteer.default.launch(launchOptions as any);
 
   const page = await browser.newPage();
   await page.setViewport({ width: 1280, height: 720 });
@@ -436,7 +480,8 @@ async function navigateToCourse(
 export async function getAllCourseData(
   cookies: Array<{ name: string; value: string; domain?: string; path?: string }>,
   courseEventTarget: string,
-  subjectCode?: string
+  subjectCode?: string,
+  skipDetails: boolean = false
 ) {
   const { browser, page } = await navigateToCourse(cookies, courseEventTarget);
 
@@ -610,6 +655,15 @@ export async function getAllCourseData(
     // Videos are extracted on-demand via getVideoLectures() when user clicks "Study"
     // Each lesson has a YouTube iframe in LessonViewer.aspx
     console.log('[VULMS AllData] Skipping video extraction for speed. Videos will be loaded on demand.')
+
+    // ─── If skipDetails, return just the basic course home data (FAST) ───
+    // Quiz/assignment/GDB detail pages are slow (3 extra navigations × ~5s each)
+    // They can be fetched later when user clicks into a subject
+    if (skipDetails) {
+      console.log('[VULMS AllData] skipDetails=true, returning basic course home data only');
+      await browser.close();
+      return courseData;
+    }
 
     // ─── ENRICH WITH ACTIVITY PAGE DATA (dates, scores, etc.) ───
     if (subjectCode) {

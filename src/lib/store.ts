@@ -542,6 +542,12 @@ export const useAppStore = create<AppState>((set, get) => ({
         })
       );
 
+      // Store the eventTargets for later use
+      const subjectEventTargets: Record<string, string> = {};
+      (data.subjects || []).forEach((s: { code: string; url: string }, i: number) => {
+        subjectEventTargets[s.code] = s.url;
+      });
+
       set({
         studentId,
         cookies: data.cookies,
@@ -551,15 +557,22 @@ export const useAppStore = create<AppState>((set, get) => ({
         view: 'dashboard',
       });
 
-      // Fetch comprehensive course data for each subject in background
+      // Fetch course data for each subject in background (fast mode: skipDetails=true)
+      // This only gets handouts + activity links from CourseHome (takes ~10s per subject)
+      // Quiz/assignment/GDB details are fetched on-demand when user clicks a subject
       const { cookies } = get();
       for (let i = 0; i < (data.subjects || []).length; i++) {
+        const subjectInfo = data.subjects[i] as { name: string; code: string; url: string };
         try {
-          set({ loadingMessage: `Loading data for ${(data.subjects[i] as {name: string}).name}...` });
           const courseRes = await fetch('/api/vulms/course-data', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ cookies, courseEventTarget: (data.subjects[i] as {url: string; code: string}).url, subjectCode: (data.subjects[i] as {code: string}).code }),
+            body: JSON.stringify({
+              cookies,
+              courseEventTarget: subjectInfo.url,
+              subjectCode: subjectInfo.code,
+              skipDetails: true, // FAST mode - just get handouts + activities from CourseHome
+            }),
           });
           const courseData = await courseRes.json();
 
@@ -578,7 +591,7 @@ export const useAppStore = create<AppState>((set, get) => ({
             set({ subjects: updatedSubjects });
           }
         } catch {
-          // Skip failed course data fetches
+          // Skip failed course data fetches - user can retry
         }
       }
 
@@ -622,8 +635,9 @@ export const useAppStore = create<AppState>((set, get) => ({
       selectedVideo: null,
     });
 
-    // If course data not loaded, fetch it
-    if (!subject.courseDataLoaded && subject.id) {
+    // Always try to load full course data when selecting a subject
+    // (basic data may already be loaded, but details like quiz dates might not)
+    if (subject.id) {
       get().loadCourseData(subject.id);
     }
   },
@@ -634,7 +648,12 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (subjectIndex === -1) return;
 
     const subject = subjects[subjectIndex];
-    if (!subject || subject.courseDataLoaded) return;
+    if (!subject) return;
+
+    // Skip if full details already loaded (has quiz dates = details loaded)
+    if (subject.courseDataLoaded && subject.quizzes.some(q => q.openDate)) {
+      return;
+    }
 
     set({ isLoading: true, loadingMessage: `Loading course data for ${subject.code}...` });
 
@@ -653,10 +672,16 @@ export const useAppStore = create<AppState>((set, get) => ({
       );
 
       if (subjectData?.url) {
+        // Fetch FULL course data including quiz/assignment/GDB details
         const courseRes = await fetch('/api/vulms/course-data', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ cookies, courseEventTarget: subjectData.url, subjectCode: subject.code }),
+          body: JSON.stringify({
+            cookies,
+            courseEventTarget: subjectData.url,
+            subjectCode: subject.code,
+            skipDetails: false, // FULL details - quiz dates, assignment dates, etc.
+          }),
         });
         const courseData = await courseRes.json();
 
@@ -664,11 +689,11 @@ export const useAppStore = create<AppState>((set, get) => ({
           const updatedSubjects = [...subjects];
           updatedSubjects[subjectIndex] = {
             ...updatedSubjects[subjectIndex],
-            handouts: courseData.courseData.handouts || [],
-            videos: courseData.courseData.videos || [], // Empty initially, loaded on demand
-            quizzes: courseData.courseData.quizzes || [],
-            assignments: courseData.courseData.assignments || [],
-            gdbs: courseData.courseData.gdbs || [],
+            handouts: courseData.courseData.handouts || subject.handouts,
+            videos: courseData.courseData.videos || subject.videos,
+            quizzes: courseData.courseData.quizzes || subject.quizzes,
+            assignments: courseData.courseData.assignments || subject.assignments,
+            gdbs: courseData.courseData.gdbs || subject.gdbs,
             courseDataLoaded: true,
           };
           set({
