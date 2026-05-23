@@ -34,6 +34,12 @@ const BROWSER_ARGS = [
 const VULMS_BASE = 'https://vulms.vu.edu.pk';
 const VULMS_LOGIN = 'https://vulms.vu.edu.pk/';
 
+// ─── Helper: Check if on Dashboard specifically (not CourseHome) ──────
+function isOnDashboard(url: string): boolean {
+  const path = new URL(url).pathname.toLowerCase();
+  return path === '/home.aspx' || path === '/';
+}
+
 // ─── Shared page-capture helper ──────────────────────────────────────────────
 
 interface PageSnapshot {
@@ -133,9 +139,7 @@ export async function POST(request: NextRequest) {
       (window as any).chrome = { runtime: {} };
     });
 
-    // ═══════════════════════════════════════════════════════════════════════════
-    // STEP 1: LOGIN
-    // ═══════════════════════════════════════════════════════════════════════════
+    // ═══ STEP 1: LOGIN ═══
     console.log('[FullDebug] Step 1: Logging in...');
     await page.goto(VULMS_LOGIN, { waitUntil: 'networkidle2', timeout: 45000 });
     await page.waitForSelector('#txtStudentID', { timeout: 15000 });
@@ -185,10 +189,8 @@ export async function POST(request: NextRequest) {
 
     console.log('[FullDebug] Login successful! URL:', postLoginUrl);
 
-    // ═══════════════════════════════════════════════════════════════════════════
-    // STEP 2: CAPTURE DASHBOARD (Home.aspx)
-    // ═══════════════════════════════════════════════════════════════════════════
-    if (!postLoginUrl.toLowerCase().includes('home.aspx')) {
+    // ═══ STEP 2: CAPTURE DASHBOARD ═══
+    if (!isOnDashboard(postLoginUrl)) {
       console.log('[FullDebug] Navigating to Home.aspx...');
       await page.goto(`${VULMS_BASE}/Home.aspx`, { waitUntil: 'networkidle2', timeout: 30000 });
     }
@@ -198,12 +200,9 @@ export async function POST(request: NextRequest) {
     console.log('[FullDebug] Step 2: Capturing dashboard...');
     const dashboardSnapshot = await capturePageSnapshot(page, 3000, 3000);
 
-    // ═══════════════════════════════════════════════════════════════════════════
-    // STEP 3: FIND FIRST SUBJECT AND CLICK IT
-    // ═══════════════════════════════════════════════════════════════════════════
+    // ═══ STEP 3: FIND FIRST SUBJECT AND CLICK IT ═══
     console.log('[FullDebug] Step 3: Finding first subject link...');
 
-    // Find first course link with __doPostBack
     const firstSubject = await page.evaluate(() => {
       const link = document.querySelector('a[id*="ibtnCourseHome"]') as HTMLAnchorElement;
       if (!link) return null;
@@ -231,142 +230,63 @@ export async function POST(request: NextRequest) {
 
     console.log('[FullDebug] Found subject:', firstSubject.code, 'eventTarget:', firstSubject.eventTarget);
 
-    // Click the subject using __doPostBack
+    // Click the subject using __doPostBack with Promise.all (FIXED!)
     const courseNavStart = Date.now();
-    await page.evaluate((target: string) => {
-      (window as any).__doPostBack(target, '');
-    }, firstSubject.eventTarget);
+    try {
+      await Promise.all([
+        page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 }),
+        page.evaluate((target: string) => {
+          (window as any).__doPostBack(target, '');
+        }, firstSubject.eventTarget),
+      ]);
+    } catch {
+      // Fallback: sequential approach
+      await page.evaluate((target: string) => {
+        (window as any).__doPostBack(target, '');
+      }, firstSubject.eventTarget);
+      await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 }).catch(() => {});
+    }
 
-    await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 }).catch(() => {
-      console.log('[FullDebug] waitForNavigation timed out after postback, continuing...');
-    });
-
-    console.log('[FullDebug] After postback, URL:', page.url());
-
-    // Wait for dynamic content
     await new Promise(r => setTimeout(r, 3000));
 
-    // ═══════════════════════════════════════════════════════════════════════════
-    // STEP 4: CAPTURE COURSE HOME PAGE
-    // ═══════════════════════════════════════════════════════════════════════════
+    const postNavUrl = page.url();
+    console.log('[FullDebug] After navigation, URL:', postNavUrl);
+    console.log('[FullDebug] isOnDashboard:', isOnDashboard(postNavUrl), '| old check (broken):', postNavUrl.toLowerCase().includes('home.aspx'));
+
+    // ═══ STEP 4: CAPTURE COURSE HOME PAGE ═══
     console.log('[FullDebug] Step 4: Capturing course home page...');
     const courseHomeSnapshot = await capturePageSnapshot(page, 5000, 3000);
 
-    // Also try a broader element search for debugging selectors
-    const broaderSearch = await page.evaluate(() => {
-      const lessonSelectors = [
-        'a[id*="lbtnViewLesson"]',
-        'a[href*="Lesson"]',
-        'a[id*="Lesson"]',
-        'a[title*="Lesson"]',
-        'a[title*="lesson"]',
-        'a:has(> img)',  // links containing images
-        'a[href*="__doPostBack"]',
-      ];
-
-      const activitySelectors = [
-        'a[id*="lbtnActivity"]',
-        'a[href*="Activity"]',
-        'a[id*="Activity"]',
-        'a[title*="Activity"]',
-        'a[title*="Quiz"]',
-        'a[title*="Assignment"]',
-        'a[title*="GDB"]',
-      ];
-
-      const results: Record<string, Array<{ id: string; href: string; text: string; title: string }>> = {};
-
-      for (const sel of lessonSelectors) {
-        try {
-          const els = document.querySelectorAll(sel);
-          const items: Array<{ id: string; href: string; text: string; title: string }> = [];
-          els.forEach((el) => {
-            const a = el as HTMLAnchorElement;
-            items.push({
-              id: a.id || '',
-              href: a.getAttribute('href') || '',
-              text: a.textContent?.trim().substring(0, 80) || '',
-              title: a.getAttribute('title') || '',
-            });
-          });
-          results[sel] = items;
-        } catch {
-          results[sel] = [];
-        }
-      }
-
-      for (const sel of activitySelectors) {
-        try {
-          const els = document.querySelectorAll(sel);
-          const items: Array<{ id: string; href: string; text: string; title: string }> = [];
-          els.forEach((el) => {
-            const a = el as HTMLAnchorElement;
-            items.push({
-              id: a.id || '',
-              href: a.getAttribute('href') || '',
-              text: a.textContent?.trim().substring(0, 80) || '',
-              title: a.getAttribute('title') || '',
-            });
-          });
-          results[sel] = items;
-        } catch {
-          results[sel] = [];
-        }
-      }
-
+    // Try specific selectors
+    const selectorResults = await page.evaluate(() => {
+      const results: Record<string, number> = {
+        'a[id*="lbtnViewLesson"]': document.querySelectorAll('a[id*="lbtnViewLesson"]').length,
+        'a[id*="lbtnActivity"]': document.querySelectorAll('a[id*="lbtnActivity"]').length,
+        'iframe[src*="youtube"]': document.querySelectorAll('iframe[src*="youtube"]').length,
+        'a[id="DownloadFiles"]': document.querySelectorAll('a[id="DownloadFiles"]').length,
+        'a[id="InternetLinks"]': document.querySelectorAll('a[id="InternetLinks"]').length,
+      };
       return results;
     });
 
-    // ═══════════════════════════════════════════════════════════════════════════
-    // STEP 5: NAVIGATE TO QUIZ ACTIVITY PAGE
-    // ═══════════════════════════════════════════════════════════════════════════
+    console.log('[FullDebug] Selector results:', selectorResults);
+
+    // ═══ STEP 5: CAPTURE QUIZ PAGE ═══
     const subjectCode = firstSubject.code;
     console.log('[FullDebug] Step 5: Navigating to Quiz page for', subjectCode);
-    const quizUrl = `${VULMS_BASE}/ActivityCalendar/OpenActivitySection.aspx?coursecode=${subjectCode}&ActivityType=QuizList`;
+    await page.goto(`${VULMS_BASE}/ActivityCalendar/OpenActivitySection.aspx?coursecode=${subjectCode}&ActivityType=QuizList`, { waitUntil: 'networkidle2', timeout: 30000 });
+    await new Promise(r => setTimeout(r, 2000));
 
-    await page.goto(quizUrl, { waitUntil: 'networkidle2', timeout: 30000 }).catch(() => {});
-    await new Promise(r => setTimeout(r, 3000));
+    const quizPageSnapshot = await capturePageSnapshot(page, 3000, 2000);
 
-    const quizPageSnapshot = await capturePageSnapshot(page, 5000, 3000);
+    // ═══ STEP 6: CAPTURE ASSIGNMENT PAGE ═══
+    console.log('[FullDebug] Step 6: Navigating to Assignment page for', subjectCode);
+    await page.goto(`${VULMS_BASE}/ActivityCalendar/OpenActivitySection.aspx?coursecode=${subjectCode}&ActivityType=Assignment`, { waitUntil: 'networkidle2', timeout: 30000 });
+    await new Promise(r => setTimeout(r, 2000));
 
-    // Also do broader search on quiz page
-    const quizBroaderSearch = await page.evaluate(() => {
-      const selectors = [
-        'span[id*="gvTileRepeaterQuiz"]',
-        'span[id*="lblTitle"]',
-        'span[id*="lblStartDate"]',
-        'span[id*="lblEndDate"]',
-        'span[id*="lblStatus"]',
-        'span[id*="lblSubmitted"]',
-        'div[id*="Quiz"]',
-        'div[id*="quiz"]',
-        'table',
-        'tr',
-        'td',
-      ];
+    const assignPageSnapshot = await capturePageSnapshot(page, 3000, 2000);
 
-      const results: Record<string, number> = {};
-      for (const sel of selectors) {
-        try {
-          results[sel] = document.querySelectorAll(sel).length;
-        } catch {
-          results[sel] = 0;
-        }
-      }
-
-      // Also capture specific span texts
-      const spanTexts: Array<{ id: string; text: string }> = [];
-      document.querySelectorAll('span[id*="gvTileRepeaterQuiz"]').forEach((el) => {
-        const s = el as HTMLSpanElement;
-        spanTexts.push({ id: s.id, text: s.textContent?.trim().substring(0, 100) || '' });
-      });
-
-      return { counts: results, spanTexts };
-    });
-
-    // ═══════════════════════════════════════════════════════════════════════════
-    // ASSEMBLE RESPONSE
-    // ═══════════════════════════════════════════════════════════════════════════
+    // ═══ ASSEMBLE RESPONSE ═══
     await browser.close();
 
     return NextResponse.json({
@@ -377,12 +297,14 @@ export async function POST(request: NextRequest) {
         courseNavigation: {
           subject: firstSubject,
           navDurationMs: Date.now() - courseNavStart,
-          postNavUrl: page.url(),
+          postNavUrl,
+          isOnDashboardCheck: isOnDashboard(postNavUrl),
+          oldBrokenCheck: postNavUrl.toLowerCase().includes('home.aspx'),
         },
         courseHome: courseHomeSnapshot,
-        broaderSearch,
+        selectorResults,
         quizPage: quizPageSnapshot,
-        quizBroaderSearch,
+        assignmentPage: assignPageSnapshot,
       },
     });
   } catch (error) {

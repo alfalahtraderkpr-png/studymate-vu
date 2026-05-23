@@ -1,27 +1,42 @@
 // VULMS automation library — Puppeteer-based for Railway/Docker deployment
 // Uses real browser to handle reCAPTCHA v3 and ASP.NET WebForms postbacks
 //
-// VULMS HTML Structure (verified via diagnostic on 2026-05-23):
-// - Dashboard (Home.aspx): GridView with ibtnCourseHome links per subject
-//   - Subject links: id="MainContent_gvCourseList_ibtnCourseHome_X"
+// ═══ VULMS HTML Structure (VERIFIED via diagnostic 2026-05-23) ═══
+//
+// Dashboard (Home.aspx):
+//   - Subject links: a[id*="ibtnCourseHome"]
 //   - href: javascript:__doPostBack('ctl00$MainContent$gvCourseList$ctl0X$ibtnCourseHome','')
-// - Course Home (CourseHome.aspx):
-//   - Lesson links: id="MainContent_lstWeeklySchedule_rptIndex_X_lbtnViewLesson_Y"
-//     - href: javascript:__doPostBack('ctl00$MainContent$lstWeeklySchedule$ctrlX$rptIndex$ctlYY$lbtnViewLesson','')
-//   - Activity links: id="MainContent_lstWeeklySchedule_rptIndex_X_lbtnActivity_Y"
-//     - href: javascript:WebForm_DoPostBackWithOptions(new WebForm_PostBackOptions("ctl00$MainContent$lstWeeklySchedule$ctrlX$rptIndex$ctlYY$lbtnActivity",""))
-//   - NO parent element with id="MainContent_lstWeeklySchedule" — it's a naming container only
-//   - Actual parent: id="MainContent_divIndex"
-//   - Week containers: id="MainContent_lstWeeklySchedule_rptIndex_X" (these are virtual, actual elements use longer IDs)
-//   - Lesson rows: div id="MainContent_lstWeeklySchedule_rptIndex_X_trLesson_Y"
-//   - Activity rows: div id="MainContent_lstWeeklySchedule_rptIndex_X_trActivity_Y"
-// - Navigation tabs: Index, Course Information, FAQs, Glossary, Books, DownloadFiles, InternetLinks, GradingScheme
-// - Activity Calendar (/ActivityCalendar/ActivityCalendar.aspx): Shows ALL activities with dates across subjects
-// - Activity pages (/ActivityCalendar/OpenActivitySection.aspx?coursecode=XXX&ActivityType=YYY):
-//   - Assignment: Title, Due Date, Total Marks, Submit/Result status
-//   - Quiz: Title, Start Date, End Date, Total Marks, Open/Close, Status, Result, Score
-//   - GDB: Title, Total Marks, Start Date, End Date, GDB Status, Submit Status
-// - Videos are inside individual lesson pages (click lbtnViewLesson → see iframe with YouTube)
+//
+// Course Home (CourseHome.aspx):
+//   - Lesson links: a[id*="lbtnViewLesson"]  → __doPostBack
+//   - Activity links: a[id*="lbtnActivity"]  → WebForm_DoPostBackWithOptions
+//   - Navigation tabs: Index, Course Information, FAQs, Glossary, Books, DownloadFiles, InternetLinks, GradingScheme
+//   - Tab IDs: a[id="Index"], a[id="DownloadFiles"], a[id="InternetLinks"], etc.
+//
+// Lesson Viewer (LessonViewer.aspx):
+//   - YouTube iframe: iframe[src*="youtube.com/embed/"]
+//   - Content iframe: iframe[src*="Courses/.../Lesson_1/"]
+//   - Assessment iframe: iframe[src*="FormativeAssessment/"]
+//
+// Quiz Page (/Quiz/QuizList.aspx):
+//   - span[id*="gvTileRepeaterQuiz_lblTitle_X"]       → "Quiz 1"
+//   - span[id*="gvTileRepeaterQuiz_lblStartDate_X"]   → "May 11, 2026 12:00 AM"
+//   - span[id*="gvTileRepeaterQuiz_lblEndDate_X"]     → "May 13, 2026 11:59 PM"
+//   - span[id*="gvTileRepeaterQuiz_lblTotalMarks_X"]  → "10"
+//   - span[id*="gvTileRepeaterQuiz_lblStatus_X"]      → "Closed" / "Open"
+//   - span[id*="gvTileRepeaterQuiz_lblSubmitted_X"]   → "Result Declared" / ""
+//   - span[id*="gvTileRepeaterQuiz_lblGetMarks_X"]    → "0"
+//
+// Assignment Page (/Assignments/StudentAssignmentListView.aspx):
+//   - span[id*="gvTileRepeaterAssignment_Label3_X"]        → "Assignment" (title)
+//   - span[id*="gvTileRepeaterAssignment_lblPayableAmount_X"] → "7. Consumer Preferences" (lesson)
+//   - span[id*="gvTileRepeaterAssignment_lblDueDate_X"]    → "May 04, 2026"
+//   - span[id*="gvTileRepeaterAssignment_lblTotalMarks_X"] → "10.00"
+//   - span[id*="gvTileRepeaterAssignment_lblExpired_X"]    → "Expired" / "Submitted"
+//
+// GDB Page (/GDB/Default.aspx):
+//   - If none: span[id="MainContent_lblmsgTile"] → "No GDB exists for this course."
+//   - If exists: span[id*="gvTileRepeaterGDB_lblTitle_X"], etc.
 
 import * as cheerio from 'cheerio';
 
@@ -163,6 +178,13 @@ async function createBrowserPage(cookies?: Array<{ name: string; value: string; 
   return { browser, page };
 }
 
+// ─── HELPER: Check if page is on the Dashboard (Home.aspx) specifically ──────
+// IMPORTANT: CourseHome.aspx also contains "home.aspx" — we must distinguish!
+function isOnDashboard(url: string): boolean {
+  const path = new URL(url).pathname.toLowerCase();
+  return path === '/home.aspx' || path === '/';
+}
+
 // ─── MAIN LOGIN ────────────────────────────────────────────────────────────────
 
 export async function loginToVULMS(studentId: string, password: string, _recaptchaToken: string = '') {
@@ -233,7 +255,7 @@ export async function loginToVULMS(studentId: string, password: string, _recaptc
     const cookies = await page.cookies();
 
     // Navigate to dashboard if needed
-    if (!currentUrl.toLowerCase().includes('home.aspx')) {
+    if (!isOnDashboard(currentUrl) && !currentUrl.toLowerCase().includes('coursehome')) {
       console.log('[VULMS] Navigating to Home...');
       await page.goto(`${VULMS_BASE}/Home.aspx`, { waitUntil: 'networkidle2', timeout: 30000 });
     }
@@ -244,14 +266,12 @@ export async function loginToVULMS(studentId: string, password: string, _recaptc
       const results: Array<{ name: string; code: string; eventTarget: string }> = [];
       const seen = new Set<string>();
 
-      // VULMS uses GridView: MainContent_gvCourseList_ibtnCourseHome_X
       const courseLinks = document.querySelectorAll('a[id*="ibtnCourseHome"]');
       courseLinks.forEach((el) => {
         const link = el as HTMLAnchorElement;
         const text = link.textContent?.trim().replace(/\s+/g, ' ') || '';
         const href = link.getAttribute('href') || '';
 
-        // Extract subject code (e.g. ECO402, MGMT627, MGT602)
         const codeMatch = text.match(/([A-Z]{2,5}\d{3}[A-Z]?)/i);
         const code = codeMatch ? codeMatch[1].toUpperCase() : '';
 
@@ -259,12 +279,10 @@ export async function loginToVULMS(studentId: string, password: string, _recaptc
         if (seen.has(code)) return;
         seen.add(code);
 
-        // Extract the postback event target
         const match = href.match(/__doPostBack\('([^']+)'/);
         const eventTarget = match ? match[1] : '';
 
         if (eventTarget) {
-          // Clean up name - remove instructor, credit hours etc
           const nameParts = text.split(/\s{2,}/);
           const cleanName = nameParts[0] || text;
           results.push({ name: cleanName, code, eventTarget });
@@ -319,27 +337,35 @@ async function navigateToCourse(
 
     console.log('[VULMS] Navigating to course via eventTarget:', courseEventTarget);
 
-    // ── APPROACH 1: Use __doPostBack ──
-    await page.evaluate((target) => {
-      (window as any).__doPostBack(target, '');
-    }, courseEventTarget);
+    // ── APPROACH 1: Use __doPostBack with Promise.all for reliable navigation ──
+    try {
+      await Promise.all([
+        page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 }),
+        page.evaluate((target) => {
+          (window as any).__doPostBack(target, '');
+        }, courseEventTarget),
+      ]);
+    } catch (e) {
+      console.log('[VULMS] Promise.all postback failed, trying sequential approach...');
+      await page.evaluate((target) => {
+        (window as any).__doPostBack(target, '');
+      }, courseEventTarget);
+      await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 }).catch(() => {});
+    }
 
-    const navResult = await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 }).catch((err) => {
-      console.log('[VULMS] waitForNavigation after __doPostBack failed:', err instanceof Error ? err.message : err);
-      return null;
-    });
+    // Wait for dynamic content
+    await new Promise(r => setTimeout(r, 2000));
 
     const urlAfterPostback = page.url();
-    console.log('[VULMS] After __doPostBack, URL:', urlAfterPostback, 'navResult:', navResult ? 'navigated' : 'no-navigation-event');
+    console.log('[VULMS] After __doPostBack, URL:', urlAfterPostback);
 
-    // ── VERIFY: Did the URL actually change away from Home.aspx? ──
-    const stillOnHome = urlAfterPostback.toLowerCase().includes('home.aspx');
-
-    if (stillOnHome) {
-      console.log('[VULMS] Still on Home.aspx after __doPostBack. Trying fallback: direct click...');
+    // ── VERIFY: Did we actually navigate away from the Dashboard? ──
+    // FIX: Use isOnDashboard() instead of .includes('home.aspx')
+    // because CourseHome.aspx also contains "home.aspx"!
+    if (isOnDashboard(urlAfterPostback)) {
+      console.log('[VULMS] Still on Dashboard after postback. Trying direct click...');
 
       // ── APPROACH 2: Find and click the actual <a> element directly ──
-      // Try multiple selectors to find the course link
       const linkSelectors = [
         `a[id*="ibtnCourseHome"][href*="${courseEventTarget}"]`,
         `a[href*="__doPostBack('${courseEventTarget}'"]`,
@@ -351,47 +377,52 @@ async function navigateToCourse(
         try {
           const link = await page.$(sel);
           if (link) {
-            console.log('[VULMS] Found link with selector:', sel, 'Clicking...');
+            console.log('[VULMS] Found link with selector:', sel);
             await Promise.all([
               link.click(),
-              page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 }).catch(() => {}),
-            ]);
+              page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 }),
+            ]).catch(() => {});
             clicked = true;
             console.log('[VULMS] After direct click, URL:', page.url());
             break;
           }
         } catch (e) {
-          console.log('[VULMS] Direct click with selector', sel, 'failed:', e instanceof Error ? e.message : e);
+          console.log('[VULMS] Direct click failed:', e instanceof Error ? e.message : e);
         }
       }
 
       if (!clicked) {
-        console.log('[VULMS] Could not find course link to click directly. Trying form submit...');
-        // ── APPROACH 3: Manual form submission ──
-        await page.evaluate((target) => {
-          const theForm = document.querySelector('form') as HTMLFormElement;
-          if (theForm) {
-            const hiddenTarget = document.querySelector('input[name="__EVENTTARGET"]') as HTMLInputElement;
-            const hiddenArg = document.querySelector('input[name="__EVENTARGUMENT"]') as HTMLInputElement;
-            if (hiddenTarget) hiddenTarget.value = target;
-            if (hiddenArg) hiddenArg.value = '';
-            theForm.submit();
-          }
-        }, courseEventTarget);
-        await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 }).catch(() => {});
+        console.log('[VULMS] Trying manual form submission...');
+        await Promise.all([
+          page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 }),
+          page.evaluate((target) => {
+            const theForm = document.querySelector('form') as HTMLFormElement;
+            if (theForm) {
+              const hiddenTarget = document.querySelector('input[name="__EVENTTARGET"]') as HTMLInputElement;
+              const hiddenArg = document.querySelector('input[name="__EVENTARGUMENT"]') as HTMLInputElement;
+              if (hiddenTarget) hiddenTarget.value = target;
+              if (hiddenArg) hiddenArg.value = '';
+              theForm.submit();
+            }
+          }, courseEventTarget),
+        ]).catch(() => {});
         console.log('[VULMS] After form submit, URL:', page.url());
       }
     }
 
-    // Wait for dynamic content (3 seconds for robustness)
+    // Wait for course page content to render
     await new Promise(r => setTimeout(r, 3000));
 
-    // Final verification
+    // Wait specifically for lesson links to appear on course page
+    try {
+      await page.waitForSelector('a[id*="lbtnViewLesson"]', { timeout: 10000 });
+      console.log('[VULMS] Lesson links found on course page!');
+    } catch {
+      console.log('[VULMS] WARNING: No lesson links found on course page after navigation');
+    }
+
     const finalUrl = page.url();
     console.log('[VULMS] Final course page URL:', finalUrl);
-    if (finalUrl.toLowerCase().includes('home.aspx')) {
-      console.log('[VULMS] WARNING: Still on Home.aspx after all navigation attempts!');
-    }
 
     return { browser, page };
   } catch (error) {
@@ -400,8 +431,7 @@ async function navigateToCourse(
   }
 }
 
-// ─── GET ALL COURSE DATA (comprehensive - from Course Home page) ──────────────
-// This is the main function that scrapes everything from the course home page
+// ─── GET ALL COURSE DATA (comprehensive) ──────────────────────────────────────
 
 export async function getAllCourseData(
   cookies: Array<{ name: string; value: string; domain?: string; path?: string }>,
@@ -412,13 +442,9 @@ export async function getAllCourseData(
 
   try {
     const currentCourseUrl = page.url();
-    console.log('[VULMS AllData] Scraping all course data from Course Home...');
-    console.log('[VULMS AllData] Current URL before scrape:', currentCourseUrl);
+    console.log('[VULMS AllData] Scraping all course data from:', currentCourseUrl);
 
     // ─── SCRAPE LESSONS & ACTIVITIES FROM COURSE HOME ───
-    // FIXED: Direct selector on <a> tags — NO parent container with lstWeeklySchedule exists!
-    // The correct approach: directly select a[id*="lbtnViewLesson"] and a[id*="lbtnActivity"]
-    // ALSO: Try broader selectors if the primary ones return zero results
     const courseData = await page.evaluate(() => {
       const result: {
         handouts: Array<{ name: string; url: string; type: string; lessonNumber: number; weekNumber: number; status: string; duration: string }>;
@@ -426,7 +452,7 @@ export async function getAllCourseData(
         quizzes: Array<{ name: string; openDate: string; closeDate: string; status: string; score: string; totalMarks: string; eventTarget: string; weekNumber: number }>;
         assignments: Array<{ name: string; dueDate: string; status: string; score: string; totalMarks: string; eventTarget: string; weekNumber: number }>;
         gdbs: Array<{ name: string; openDate: string; closeDate: string; status: string; totalMarks: string; submitStatus: string; eventTarget: string }>;
-        lessons: Array<{ name: string; eventTarget: string; lessonNumber: number; weekNumber: number; status: string }>;
+        lessons: Array<{ name: string; eventTarget: string; lessonNumber: number; weekNumber: number; status: string; duration: string }>;
       } = {
         handouts: [],
         videos: [],
@@ -440,29 +466,8 @@ export async function getAllCourseData(
       let lessonCount = 0;
 
       // ── LESSON LINKS ──
-      // Try primary selector first, then fall back to broader selectors
-      let lessonLinks = document.querySelectorAll('a[id*="lbtnViewLesson"]');
-      console.log('[VULMS AllData] Primary lesson selector found:', lessonLinks.length);
-
-      if (lessonLinks.length === 0) {
-        // Try broader selectors
-        const broaderSelectors = [
-          'a[href*="Lesson"]',
-          'a[id*="Lesson"]',
-          'a[id*="lbtnView"]',
-          'a[title*="Lesson"]',
-          'a[title*="lesson"]',
-          'a[id*="ViewLesson"]',
-        ];
-        for (const sel of broaderSelectors) {
-          const els = document.querySelectorAll(sel);
-          console.log('[VULMS AllData] Broader lesson selector', sel, 'found:', els.length);
-          if (els.length > 0) {
-            lessonLinks = els;
-            break;
-          }
-        }
-      }
+      const lessonLinks = document.querySelectorAll('a[id*="lbtnViewLesson"]');
+      console.log('[VULMS AllData] Found lesson links:', lessonLinks.length);
 
       lessonLinks.forEach((el) => {
         const link = el as HTMLAnchorElement;
@@ -490,65 +495,45 @@ export async function getAllCourseData(
         const weekNumber = weekMatch ? parseInt(weekMatch[1]) + 1 : 0;
 
         // Get lesson status and duration from parent/sibling elements
-        const parentDiv = link.closest('div[id*="trLesson"]') || link.closest('div[id*="Lesson"]') || link.parentElement;
+        const parentDiv = link.closest('div[id*="trLesson"]') || link.closest('div[id*="Lesson"]') || link.parentElement?.parentElement;
         let status = 'closed';
         let duration = '';
         if (parentDiv) {
           const parentText = parentDiv.textContent?.toLowerCase() || '';
           status = parentText.includes('open') ? 'open' : 'closed';
-          // Try to get duration from sibling spans
           const durationSpan = parentDiv.querySelector('span[id*="lblLessonDuration"]') || parentDiv.querySelector('span[id*="Duration"]');
           if (durationSpan) {
             duration = durationSpan.textContent?.trim() || '';
+          } else {
+            // Try to extract duration from text (e.g., "01:08:31")
+            const durationMatch = parentText.match(/(\d{2}:\d{2}:\d{2})/);
+            if (durationMatch) duration = durationMatch[1];
           }
         }
 
-        // Even without eventTarget, add as handout if we have text
-        if (text) {
-          result.lessons.push({
-            name: text,
-            eventTarget,
-            lessonNumber: lessonCount,
-            weekNumber,
-            status,
-          });
+        result.lessons.push({
+          name: text,
+          eventTarget,
+          lessonNumber: lessonCount,
+          weekNumber,
+          status,
+          duration,
+        });
 
-          // Each lesson IS a handout in VULMS
-          result.handouts.push({
-            name: text,
-            url: eventTarget,
-            type: 'lesson',
-            lessonNumber: lessonCount,
-            weekNumber,
-            status,
-            duration,
-          });
-        }
+        result.handouts.push({
+          name: text,
+          url: eventTarget,
+          type: 'lesson',
+          lessonNumber: lessonCount,
+          weekNumber,
+          status,
+          duration,
+        });
       });
 
       // ── ACTIVITY LINKS ──
-      let activityLinks = document.querySelectorAll('a[id*="lbtnActivity"]');
-      console.log('[VULMS AllData] Primary activity selector found:', activityLinks.length);
-
-      if (activityLinks.length === 0) {
-        const broaderActivitySelectors = [
-          'a[href*="Activity"]',
-          'a[id*="Activity"]',
-          'a[title*="Activity"]',
-          'a[title*="Quiz"]',
-          'a[title*="Assignment"]',
-          'a[title*="GDB"]',
-          'a[id*="lbtnAct"]',
-        ];
-        for (const sel of broaderActivitySelectors) {
-          const els = document.querySelectorAll(sel);
-          console.log('[VULMS AllData] Broader activity selector', sel, 'found:', els.length);
-          if (els.length > 0) {
-            activityLinks = els;
-            break;
-          }
-        }
-      }
+      const activityLinks = document.querySelectorAll('a[id*="lbtnActivity"]');
+      console.log('[VULMS AllData] Found activity links:', activityLinks.length);
 
       activityLinks.forEach((el) => {
         const link = el as HTMLAnchorElement;
@@ -559,7 +544,6 @@ export async function getAllCourseData(
         if (!text || seen.has('activity:' + id)) return;
         seen.add('activity:' + id);
 
-        // Activity uses WebForm_DoPostBackWithOptions - extract eventTarget differently
         let eventTarget = '';
         const doPostBackMatch = href.match(/__doPostBack\('([^']+)'/);
         const webFormMatch = href.match(/WebForm_PostBackOptions\("([^"]+)"/);
@@ -570,19 +554,8 @@ export async function getAllCourseData(
           eventTarget = webFormMatch[1];
         }
 
-        // Extract week number from ID
         const weekMatch = id.match(/rptIndex_(\d+)/);
         const weekNumber = weekMatch ? parseInt(weekMatch[1]) + 1 : 0;
-
-        // Get activity status from parent div
-        const parentDiv = link.closest('div[id*="trActivity"]') || link.closest('div[id*="Activity"]') || link.parentElement;
-        let activityStatus = '';
-        if (parentDiv) {
-          const parentText = parentDiv.textContent?.trim() || '';
-          // Look for status text like "Open", "Closed", "Expired"
-          const statusMatch = parentText.match(/(Open|Closed|Expired|Not Started)/i);
-          activityStatus = statusMatch ? statusMatch[1].toLowerCase() : '';
-        }
 
         const lowerText = text.toLowerCase();
 
@@ -591,7 +564,7 @@ export async function getAllCourseData(
             name: text,
             openDate: '',
             closeDate: '',
-            status: activityStatus === 'open' ? 'in_progress' : 'not_started',
+            status: 'not_started',
             score: '',
             totalMarks: '',
             eventTarget,
@@ -620,40 +593,6 @@ export async function getAllCourseData(
         }
       });
 
-      // ── CHECK FOR YOUTUBE/VIDEO LINKS ON COURSE HOME ──
-      const ytIframes = document.querySelectorAll('iframe[src*="youtube.com"], iframe[src*="youtu.be"]');
-      ytIframes.forEach((iframe, index) => {
-        const src = iframe.getAttribute('src') || '';
-        if (src && !seen.has('yt:' + src)) {
-          seen.add('yt:' + src);
-          const videoIdMatch = src.match(/youtube\.com\/embed\/([a-zA-Z0-9_-]+)/);
-          const ytUrl = videoIdMatch ? `https://www.youtube.com/watch?v=${videoIdMatch[1]}` : src;
-          result.videos.push({
-            name: `Video Lecture ${index + 1}`,
-            youtubeUrl: ytUrl,
-            lessonNumber: String(index + 1),
-          });
-        }
-      });
-
-      const ytLinks = document.querySelectorAll('a[href*="youtube.com"], a[href*="youtu.be"]');
-      ytLinks.forEach((el, index) => {
-        const link = el as HTMLAnchorElement;
-        const href = link.href || '';
-        const text = link.textContent?.trim().replace(/\s+/g, ' ') || `Video Lecture ${index + 1}`;
-        if (!href || seen.has('yt:' + href)) return;
-        seen.add('yt:' + href);
-
-        const videoIdMatch = href.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/)([a-zA-Z0-9_-]+)/);
-        const ytUrl = videoIdMatch ? `https://www.youtube.com/watch?v=${videoIdMatch[1]}` : href;
-
-        result.videos.push({
-          name: text,
-          youtubeUrl: ytUrl,
-          lessonNumber: String(index + 1),
-        });
-      });
-
       return result;
     });
 
@@ -667,39 +606,83 @@ export async function getAllCourseData(
       currentUrl: currentCourseUrl,
     });
 
-    // ─── If ALL data is empty, capture debug info ───
-    const allEmpty = courseData.handouts.length === 0 && courseData.videos.length === 0
-      && courseData.quizzes.length === 0 && courseData.assignments.length === 0
-      && courseData.gdbs.length === 0 && courseData.lessons.length === 0;
+    // ─── EXTRACT VIDEOS FROM LESSON PAGES ───
+    // YouTube videos are inside individual lesson pages (LessonViewer.aspx)
+    // We need to click into each lesson and check for YouTube iframes
+    if (courseData.lessons.length > 0 && courseData.videos.length === 0) {
+      console.log('[VULMS AllData] Extracting videos from lesson pages...');
+      const maxLessonsToCheck = Math.min(courseData.lessons.length, 45); // limit to avoid timeout
 
-    if (allEmpty) {
-      const debugInfo = await page.evaluate(() => {
-        return {
-          url: window.location.href,
-          title: document.title,
-          bodyTextPreview: (document.body.innerText || '').substring(0, 2000),
-          allAnchorIds: Array.from(document.querySelectorAll('a[id]')).map(a => ({
-            id: a.id,
-            text: a.textContent?.trim().substring(0, 60) || '',
-            href: a.getAttribute('href')?.substring(0, 80) || '',
-          })),
-          allDivIds: Array.from(document.querySelectorAll('div[id]')).map(d => d.id).filter(id => id),
-        };
-      });
-      console.log('[VULMS AllData] WARNING: All course data is EMPTY!');
-      console.log('[VULMS AllData] Debug info - URL:', debugInfo.url, 'Title:', debugInfo.title);
-      console.log('[VULMS AllData] Debug info - Anchor IDs:', JSON.stringify(debugInfo.allAnchorIds.slice(0, 20)));
-      console.log('[VULMS AllData] Debug info - Div IDs:', JSON.stringify(debugInfo.allDivIds.slice(0, 30)));
-      console.log('[VULMS AllData] Debug info - Body text preview:', debugInfo.bodyTextPreview.substring(0, 500));
+      for (let i = 0; i < maxLessonsToCheck; i++) {
+        const lesson = courseData.lessons[i];
+        if (!lesson.eventTarget) continue;
+
+        try {
+          // Click the lesson link
+          await Promise.all([
+            page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 20000 }).catch(() => {}),
+            page.evaluate((target) => {
+              (window as any).__doPostBack(target, '');
+            }, lesson.eventTarget),
+          ]);
+
+          await new Promise(r => setTimeout(r, 2000));
+
+          // Check for YouTube iframe on the lesson page
+          const videoInfo = await page.evaluate(() => {
+            const iframe = document.querySelector('iframe[src*="youtube.com/embed/"]') as HTMLIFrameElement;
+            if (iframe) {
+              const src = iframe.getAttribute('src') || '';
+              const videoIdMatch = src.match(/youtube\.com\/embed\/([a-zA-Z0-9_-]+)/);
+              if (videoIdMatch) {
+                return `https://www.youtube.com/watch?v=${videoIdMatch[1]}`;
+              }
+            }
+            return null;
+          });
+
+          if (videoInfo) {
+            courseData.videos.push({
+              name: lesson.name,
+              youtubeUrl: videoInfo,
+              lessonNumber: String(lesson.lessonNumber),
+            });
+            console.log(`[VULMS AllData] Found video for lesson ${lesson.lessonNumber}: ${lesson.name}`);
+          }
+
+          // Go back to course page
+          await page.goBack({ waitUntil: 'networkidle2', timeout: 20000 }).catch(async () => {
+            // If goBack fails, navigate directly
+            await page.goto(`${VULMS_BASE}/CourseHome.aspx`, { waitUntil: 'networkidle2', timeout: 20000 }).catch(() => {});
+          });
+          await new Promise(r => setTimeout(r, 1500));
+
+          // Make sure we're back on the course page with lesson links
+          try {
+            await page.waitForSelector('a[id*="lbtnViewLesson"]', { timeout: 5000 });
+          } catch {
+            // If not, try navigating back to course page
+            console.log('[VULMS AllData] Lost course page context, re-navigating...');
+            break;
+          }
+        } catch (e) {
+          console.log(`[VULMS AllData] Failed to extract video from lesson ${lesson.lessonNumber}:`, e instanceof Error ? e.message : e);
+          // Try to get back to course page
+          await page.goto(`${VULMS_BASE}/CourseHome.aspx`, { waitUntil: 'networkidle2', timeout: 20000 }).catch(() => {});
+          await new Promise(r => setTimeout(r, 1500));
+        }
+      }
+
+      console.log(`[VULMS AllData] Extracted ${courseData.videos.length} videos from lesson pages`);
     }
 
-    // ─── ENRICH WITH ACTIVITY CALENDAR DATA (dates, scores, etc.) ───
+    // ─── ENRICH WITH ACTIVITY PAGE DATA (dates, scores, etc.) ───
     if (subjectCode) {
       console.log('[VULMS AllData] Fetching activity details for', subjectCode);
 
-      // ── Helper: determine quiz status from dates ──
+      // ── Helper: determine quiz status ──
       const determineQuizStatus = (startDate: string, endDate: string, resultStatus: string, score: string): 'completed' | 'not_started' | 'in_progress' | 'expired' => {
-        if (resultStatus === 'declared' || score) return 'completed';
+        if (resultStatus.toLowerCase().includes('declared') || (score && score !== '0' && score !== '')) return 'completed';
         const now = new Date();
         if (startDate) {
           try {
@@ -714,10 +697,9 @@ export async function getAllCourseData(
 
       // ── Helper: determine assignment status ──
       const determineAssignmentStatus = (dueDate: string, submitStatus: string, resultStatus: string): 'submitted' | 'not_submitted' | 'overdue' | 'graded' => {
-        if (submitStatus === 'submitted' || resultStatus === 'declared') {
-          return resultStatus === 'declared' ? 'graded' : 'submitted';
-        }
-        if (submitStatus === 'expired') return 'overdue';
+        if (submitStatus.toLowerCase().includes('submitted') && !submitStatus.toLowerCase().includes('not')) return 'submitted';
+        if (submitStatus.toLowerCase().includes('expired')) return 'overdue';
+        if (resultStatus.toLowerCase().includes('declared')) return 'graded';
         if (dueDate) {
           try {
             if (new Date() > new Date(dueDate)) return 'overdue';
@@ -726,84 +708,74 @@ export async function getAllCourseData(
         return 'not_submitted';
       };
 
-      // ── Helper: name matching (handles "Quiz 01" == "Quiz 1", "Assignment#1" == "Assignment 1") ──
+      // ── Helper: name matching ──
       const namesMatch = (a: string, b: string): boolean => {
-        // Normalize: lowercase, remove special chars, strip leading zeros from numbers
         const normalize = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '').replace(/0+(\d+)/g, '$1');
         const na = normalize(a);
         const nb = normalize(b);
         return na === nb || na.includes(nb) || nb.includes(na);
       };
 
-      // Fetch Quiz details
+      // ═══ FETCH QUIZ DETAILS ═══
       try {
+        console.log('[VULMS AllData] Fetching quiz details...');
+        // Navigate to quiz page (may redirect from Activity Calendar URL)
         await page.goto(`${VULMS_BASE}/ActivityCalendar/OpenActivitySection.aspx?coursecode=${subjectCode}&ActivityType=QuizList`, { waitUntil: 'networkidle2', timeout: 30000 });
-        await new Promise(r => setTimeout(r, 1500));
+        await new Promise(r => setTimeout(r, 2000));
 
-        // Use specific element IDs for quiz page: gvTileRepeaterQuiz_lblTitle_X, lblStartDate_X, lblEndDate_X, lblStatus_X, lblSubmitted_X
+        const quizUrl = page.url();
+        console.log('[VULMS AllData] Quiz page URL:', quizUrl);
+
         const quizDetails = await page.evaluate(() => {
           const quizzes: Array<{ name: string; startDate: string; endDate: string; totalMarks: string; status: string; resultStatus: string; score: string }> = [];
 
-          // Find all quiz title elements to determine how many quizzes exist
+          // Use the VERIFIED element IDs
           const titleEls = document.querySelectorAll('span[id*="gvTileRepeaterQuiz_lblTitle_"]');
+          console.log('Found quiz title elements:', titleEls.length);
+
           titleEls.forEach((el, idx) => {
             const title = el.textContent?.trim() || '';
             const startDateEl = document.querySelector(`span[id*="gvTileRepeaterQuiz_lblStartDate_${idx}"]`);
             const endDateEl = document.querySelector(`span[id*="gvTileRepeaterQuiz_lblEndDate_${idx}"]`);
             const statusEl = document.querySelector(`span[id*="gvTileRepeaterQuiz_lblStatus_${idx}"]`);
             const submittedEl = document.querySelector(`span[id*="gvTileRepeaterQuiz_lblSubmitted_${idx}"]`);
-            // Total marks might be in a sibling or nearby element - try multiple selectors
-            const marksEl = document.querySelector(`span[id*="gvTileRepeaterQuiz_Label5_${idx}"], span[id*="gvTileRepeaterQuiz_lblTotalMarks_${idx}"]`);
-            // If standard marks element not found, look for the number between labels
-            let marks = marksEl?.textContent?.trim() || '';
-            if (!marks || marks.includes(':')) {
-              // Try finding it from the parent container text
-              const container = el.closest('div, li');
-              if (container) {
-                const containerText = container.textContent || '';
-                // Find the number that appears between endDate and status
-                const marksMatch = containerText.match(/(\d+(?:\.\d+)?)\s*(?:Closed|Open|Result)/);
-                marks = marksMatch ? marksMatch[1] : '';
-              }
-            }
+            const marksEl = document.querySelector(`span[id*="gvTileRepeaterQuiz_lblTotalMarks_${idx}"]`);
+            const scoreEl = document.querySelector(`span[id*="gvTileRepeaterQuiz_lblGetMarks_${idx}"]`);
 
             if (title) {
               quizzes.push({
                 name: title,
                 startDate: startDateEl?.textContent?.trim() || '',
                 endDate: endDateEl?.textContent?.trim() || '',
-                totalMarks: marks,
-                status: statusEl?.textContent?.trim()?.toLowerCase() || '',
-                resultStatus: submittedEl?.textContent?.trim()?.toLowerCase() || '',
-                score: '', // Score is typically shown in Result column
+                totalMarks: marksEl?.textContent?.trim() || '',
+                status: statusEl?.textContent?.trim() || '',
+                resultStatus: submittedEl?.textContent?.trim() || '',
+                score: scoreEl?.textContent?.trim() || '',
               });
             }
           });
 
-          // Fallback: if no structured elements found, parse from body text
+          // Fallback: parse from body text if no structured elements
           if (quizzes.length === 0) {
             const bodyText = document.body.innerText || '';
             const lines = bodyText.split('\n').map(l => l.trim()).filter(l => l);
             let inQuizSection = false;
             for (let i = 0; i < lines.length; i++) {
-              const line = lines[i];
-              if (line.match(/Quiz\s*#?\s*\d+/i)) {
+              if (lines[i].match(/Quiz\s*#?\s*\d+/i)) {
                 inQuizSection = true;
-                const name = line.match(/Quiz\s*#?\s*\d+/i)?.[0] || line;
-                // Look for date patterns in next lines
+                const name = lines[i].match(/Quiz\s*#?\s*\d+/i)?.[0] || lines[i];
                 let startDate = '';
                 let endDate = '';
                 let totalMarks = '';
                 let status = '';
                 let resultStatus = '';
-                for (let j = i + 1; j < Math.min(i + 10, lines.length); j++) {
-                  const dateMatch = lines[j].match(/(\w{3,9}\s+\d{1,2},?\s+\d{4})\s+(\d{1,2}:\d{2}\s*(?:AM|PM))?/);
+                for (let j = i + 1; j < Math.min(i + 15, lines.length); j++) {
+                  const dateMatch = lines[j].match(/(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2},?\s+\d{4}/i);
                   if (dateMatch && !startDate) startDate = lines[j];
                   else if (dateMatch && startDate && !endDate) endDate = lines[j];
                   else if (lines[j].match(/^\d+(?:\.\d+)?$/) && !totalMarks) totalMarks = lines[j];
                   else if (lines[j].toLowerCase() === 'closed' || lines[j].toLowerCase() === 'open') status = lines[j].toLowerCase();
-                  else if (lines[j].toLowerCase().includes('result')) resultStatus = lines[j].toLowerCase();
-                  else if (lines[j].match(/^\d+$/) && totalMarks) { /* could be score */ }
+                  else if (lines[j].toLowerCase().includes('result')) resultStatus = lines[j];
                 }
                 quizzes.push({ name, startDate, endDate, totalMarks, status, resultStatus, score: '' });
               }
@@ -814,7 +786,7 @@ export async function getAllCourseData(
         });
 
         if (quizDetails.length > 0) {
-          // Merge matching quizzes with dates
+          // Merge with existing quizzes from course home, or add as new
           const matchedQuizNames = new Set<string>();
           courseData.quizzes = courseData.quizzes.map(q => {
             const detail = quizDetails.find(d => namesMatch(q.name, d.name));
@@ -832,7 +804,7 @@ export async function getAllCourseData(
             return q;
           });
 
-          // ADD quizzes from activity page that don't match any existing quiz
+          // Add quizzes from activity page that don't match any existing quiz
           quizDetails.forEach((detail) => {
             if (!matchedQuizNames.has(detail.name) && !courseData.quizzes.some(q => namesMatch(q.name, detail.name))) {
               courseData.quizzes.push({
@@ -854,40 +826,68 @@ export async function getAllCourseData(
         console.log('[VULMS AllData] Quiz details fetch failed:', e instanceof Error ? e.message : e);
       }
 
-      // Fetch Assignment details
+      // ═══ FETCH ASSIGNMENT DETAILS ═══
       try {
+        console.log('[VULMS AllData] Fetching assignment details...');
         await page.goto(`${VULMS_BASE}/ActivityCalendar/OpenActivitySection.aspx?coursecode=${subjectCode}&ActivityType=Assignment`, { waitUntil: 'networkidle2', timeout: 30000 });
-        await new Promise(r => setTimeout(r, 1500));
+        await new Promise(r => setTimeout(r, 2000));
 
-        // Use specific element IDs: gvTileRepeaterAssignment_lblDueDate_X, lblTotalMarks_X, lblExpired_X, lblPayableAmount_X (lesson)
+        const assignUrl = page.url();
+        console.log('[VULMS AllData] Assignment page URL:', assignUrl);
+
         const assignDetails = await page.evaluate(() => {
           const assignments: Array<{ name: string; lesson: string; dueDate: string; totalMarks: string; submitStatus: string; resultStatus: string; score: string }> = [];
 
-          const titleEls = document.querySelectorAll('span[id*="gvTileRepeaterAssignment_lblPayableAmount_"]');
+          // Use VERIFIED element IDs
+          const titleEls = document.querySelectorAll('span[id*="gvTileRepeaterAssignment_Label3_"]');
+          console.log('Found assignment title elements:', titleEls.length);
+
           if (titleEls.length > 0) {
             titleEls.forEach((el, idx) => {
-              const lesson = el.textContent?.trim() || '';
+              const title = el.textContent?.trim() || 'Assignment';
+              const lessonEl = document.querySelector(`span[id*="gvTileRepeaterAssignment_lblPayableAmount_${idx}"]`);
               const dueDateEl = document.querySelector(`span[id*="gvTileRepeaterAssignment_lblDueDate_${idx}"]`);
               const marksEl = document.querySelector(`span[id*="gvTileRepeaterAssignment_lblTotalMarks_${idx}"]`);
               const statusEl = document.querySelector(`span[id*="gvTileRepeaterAssignment_lblExpired_${idx}"]`);
 
-              // The title is usually "Assignment" with a lesson number
-              const titleEl = document.querySelector(`span[id*="gvTileRepeaterAssignment_Label3_${idx}"]`);
-              const title = titleEl?.textContent?.trim() || 'Assignment';
+              const lesson = lessonEl?.textContent?.trim() || '';
               const statusText = statusEl?.textContent?.trim()?.toLowerCase() || '';
 
               assignments.push({
-                name: `${title} - ${lesson}` || `Assignment ${idx + 1}`,
+                name: lesson ? `${title} - ${lesson}` : title,
                 lesson,
                 dueDate: dueDateEl?.textContent?.trim() || '',
                 totalMarks: marksEl?.textContent?.trim() || '',
-                submitStatus: statusText.includes('submitted') ? 'submitted' : statusText.includes('expired') ? 'expired' : 'pending',
-                resultStatus: statusText.includes('result') ? 'declared' : '',
+                submitStatus: statusText,
+                resultStatus: '',
                 score: '',
               });
             });
           } else {
-            // Fallback: parse from body text
+            // Fallback: try finding by payable amount (lesson name) elements
+            const payableEls = document.querySelectorAll('span[id*="gvTileRepeaterAssignment_lblPayableAmount_"]');
+            if (payableEls.length > 0) {
+              payableEls.forEach((el, idx) => {
+                const lesson = el.textContent?.trim() || '';
+                const dueDateEl = document.querySelector(`span[id*="gvTileRepeaterAssignment_lblDueDate_${idx}"]`);
+                const marksEl = document.querySelector(`span[id*="gvTileRepeaterAssignment_lblTotalMarks_${idx}"]`);
+                const statusEl = document.querySelector(`span[id*="gvTileRepeaterAssignment_lblExpired_${idx}"]`);
+
+                assignments.push({
+                  name: lesson ? `Assignment - ${lesson}` : `Assignment ${idx + 1}`,
+                  lesson,
+                  dueDate: dueDateEl?.textContent?.trim() || '',
+                  totalMarks: marksEl?.textContent?.trim() || '',
+                  submitStatus: statusEl?.textContent?.trim()?.toLowerCase() || '',
+                  resultStatus: '',
+                  score: '',
+                });
+              });
+            }
+          }
+
+          // Final fallback: parse from body text
+          if (assignments.length === 0) {
             const bodyText = document.body.innerText || '';
             const lines = bodyText.split('\n').map(l => l.trim()).filter(l => l);
             for (let i = 0; i < lines.length; i++) {
@@ -895,14 +895,15 @@ export async function getAllCourseData(
                 let dueDate = '';
                 let totalMarks = '';
                 let submitStatus = 'pending';
-                for (let j = i + 1; j < Math.min(i + 10, lines.length); j++) {
-                  if (lines[j].match(/\w{3,9}\s+\d{1,2},?\s+\d{4}/) && !dueDate) dueDate = lines[j];
+                for (let j = i + 1; j < Math.min(i + 15, lines.length); j++) {
+                  const dateMatch = lines[j].match(/(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2},?\s+\d{4}/i);
+                  if (dateMatch && !dueDate) dueDate = lines[j];
                   else if (lines[j].match(/^\d+(?:\.\d+)?$/) && !totalMarks) totalMarks = lines[j];
                   else if (lines[j].toLowerCase().includes('expired')) submitStatus = 'expired';
                   else if (lines[j].toLowerCase().includes('submitted')) submitStatus = 'submitted';
                 }
-                assignments.push({ name: `Assignment`, lesson: '', dueDate, totalMarks, submitStatus, resultStatus: '', score: '' });
-                break; // Only first assignment on fallback
+                assignments.push({ name: 'Assignment', lesson: '', dueDate, totalMarks, submitStatus, resultStatus: '', score: '' });
+                break;
               }
             }
           }
@@ -913,7 +914,7 @@ export async function getAllCourseData(
         if (assignDetails.length > 0) {
           const matchedAssignNames = new Set<string>();
           courseData.assignments = courseData.assignments.map(a => {
-            const detail = assignDetails.find(d => namesMatch(a.name, d.name));
+            const detail = assignDetails.find(d => namesMatch(a.name, d.name) || (d.lesson && a.name.toLowerCase().includes(d.lesson.toLowerCase())));
             if (detail) {
               matchedAssignNames.add(detail.name);
               return {
@@ -927,7 +928,6 @@ export async function getAllCourseData(
             return a;
           });
 
-          // ADD assignments from activity page that don't match any existing
           assignDetails.forEach((detail) => {
             if (!matchedAssignNames.has(detail.name) && !courseData.assignments.some(a => namesMatch(a.name, detail.name))) {
               courseData.assignments.push({
@@ -948,14 +948,23 @@ export async function getAllCourseData(
         console.log('[VULMS AllData] Assignment details fetch failed:', e instanceof Error ? e.message : e);
       }
 
-      // Fetch GDB details
+      // ═══ FETCH GDB DETAILS ═══
       try {
+        console.log('[VULMS AllData] Fetching GDB details...');
         await page.goto(`${VULMS_BASE}/ActivityCalendar/OpenActivitySection.aspx?coursecode=${subjectCode}&ActivityType=GDB`, { waitUntil: 'networkidle2', timeout: 30000 });
-        await new Promise(r => setTimeout(r, 1500));
+        await new Promise(r => setTimeout(r, 2000));
 
-        // Use specific element IDs: gvTileRepeaterGDB_lblTitle_X, lblStatus_X, lblSubmissionStatus_X, Label4_X (start date), Label3_X (end date), Label9_X (marks)
+        const gdbUrl = page.url();
+        console.log('[VULMS AllData] GDB page URL:', gdbUrl);
+
         const gdbResult = await page.evaluate(() => {
           const gdbs: Array<{ name: string; openDate: string; closeDate: string; totalMarks: string; gdbStatus: string; submitStatus: string }> = [];
+
+          // Check for "No GDB exists" message
+          const noGdbEl = document.querySelector('span[id*="lblmsgTile"]');
+          if (noGdbEl && noGdbEl.textContent?.includes('No GDB')) {
+            return gdbs; // Return empty array
+          }
 
           const titleEls = document.querySelectorAll('span[id*="gvTileRepeaterGDB_lblTitle_"]');
           if (titleEls.length > 0) {
@@ -976,27 +985,32 @@ export async function getAllCourseData(
                 submitStatus: submitEl?.textContent?.trim()?.toLowerCase() || '',
               });
             });
-          } else {
-            // Fallback: parse from body text
+          }
+
+          // Fallback: parse from body text
+          if (gdbs.length === 0) {
             const bodyText = document.body.innerText || '';
-            const lines = bodyText.split('\n').map(l => l.trim()).filter(l => l);
-            for (let i = 0; i < lines.length; i++) {
-              if (lines[i].toLowerCase().includes('gdb')) {
-                let openDate = '';
-                let closeDate = '';
-                let totalMarks = '';
-                let gdbStatus = '';
-                let submitStatus = '';
-                for (let j = i + 1; j < Math.min(i + 15, lines.length); j++) {
-                  if (lines[j].match(/\w{3,9}\s+\d{1,2},?\s+\d{4}/) && !openDate) openDate = lines[j];
-                  else if (lines[j].match(/\w{3,9}\s+\d{1,2},?\s+\d{4}/) && openDate && !closeDate) closeDate = lines[j];
-                  else if (lines[j].match(/^\d+$/) && !totalMarks) totalMarks = lines[j];
-                  else if (lines[j].toLowerCase() === 'closed' || lines[j].toLowerCase() === 'open') gdbStatus = lines[j].toLowerCase();
-                  else if (lines[j].toLowerCase().includes('submitted') || lines[j].toLowerCase().includes('not submitted')) submitStatus = lines[j].toLowerCase();
+            if (!bodyText.toLowerCase().includes('no gdb')) {
+              const lines = bodyText.split('\n').map(l => l.trim()).filter(l => l);
+              for (let i = 0; i < lines.length; i++) {
+                if (lines[i].toLowerCase().includes('gdb') && !lines[i].toLowerCase().includes('no gdb')) {
+                  let openDate = '';
+                  let closeDate = '';
+                  let totalMarks = '';
+                  let gdbStatus = '';
+                  let submitStatus = '';
+                  for (let j = i + 1; j < Math.min(i + 15, lines.length); j++) {
+                    const dateMatch = lines[j].match(/(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2},?\s+\d{4}/i);
+                    if (dateMatch && !openDate) openDate = lines[j];
+                    else if (dateMatch && openDate && !closeDate) closeDate = lines[j];
+                    else if (lines[j].match(/^\d+$/) && !totalMarks) totalMarks = lines[j];
+                    else if (lines[j].toLowerCase() === 'closed' || lines[j].toLowerCase() === 'open') gdbStatus = lines[j].toLowerCase();
+                    else if (lines[j].toLowerCase().includes('submitted') || lines[j].toLowerCase().includes('not submitted')) submitStatus = lines[j].toLowerCase();
+                  }
+                  const name = lines[i].match(/GDB\s*#?\s*\d+/i)?.[0] || lines[i];
+                  gdbs.push({ name, openDate, closeDate, totalMarks, gdbStatus, submitStatus });
+                  break;
                 }
-                const name = lines[i].match(/GDB\s*#?\s*\d+/i)?.[0] || lines[i];
-                gdbs.push({ name, openDate, closeDate, totalMarks, gdbStatus, submitStatus });
-                break; // Only first GDB on fallback
               }
             }
           }
@@ -1022,7 +1036,6 @@ export async function getAllCourseData(
             return g;
           });
 
-          // ADD GDBs from activity page that don't match any existing
           gdbResult.forEach((detail) => {
             if (!matchedGdbNames.has(detail.name) && !courseData.gdbs.some(g => namesMatch(g.name, detail.name))) {
               courseData.gdbs.push({
@@ -1042,6 +1055,102 @@ export async function getAllCourseData(
       } catch (e) {
         console.log('[VULMS AllData] GDB details fetch failed:', e instanceof Error ? e.message : e);
       }
+
+      // ═══ FETCH DOWNLOAD FILES ═══
+      // Go back to course page and click Download Files tab
+      try {
+        console.log('[VULMS AllData] Fetching download files...');
+        await page.goto(`${VULMS_BASE}/CourseHome.aspx`, { waitUntil: 'networkidle2', timeout: 20000 }).catch(() => {});
+        await new Promise(r => setTimeout(r, 1500));
+
+        // Click Download Files tab
+        const downloadTab = await page.$('a[id="DownloadFiles"]');
+        if (downloadTab) {
+          await downloadTab.click();
+          await new Promise(r => setTimeout(r, 3000));
+
+          const downloadFiles = await page.evaluate(() => {
+            const files: Array<{ name: string; size: string; url: string }> = [];
+            // Parse the download files section from body text
+            const bodyText = document.body.innerText || '';
+            const lines = bodyText.split('\n').map(l => l.trim()).filter(l => l);
+
+            let currentFile = '';
+            let currentSize = '';
+            for (const line of lines) {
+              if (line.toLowerCase().includes('file size:')) {
+                currentSize = line.replace(/file size:/i, '').trim();
+              } else if (line.startsWith('http') || line.includes('.pdf') || line.includes('.pptx') || line.includes('.zip') || line.includes('.doc')) {
+                if (currentFile) {
+                  files.push({ name: currentFile, size: currentSize, url: line });
+                }
+                currentFile = '';
+                currentSize = '';
+              } else if (line.length > 3 && !line.startsWith('#') && !line.includes('Back') && !line.includes('Download Files') && !line.includes('Learning Management') && !line.includes('Virtual University')) {
+                if (!currentFile && line.length < 100) {
+                  currentFile = line;
+                }
+              }
+            }
+
+            // Also try to find actual download links
+            document.querySelectorAll('a[href*="Download"], a[href*=".pdf"], a[href*=".pptx"], a[href*=".zip"]').forEach((el) => {
+              const a = el as HTMLAnchorElement;
+              const href = a.href || a.getAttribute('href') || '';
+              const name = a.textContent?.trim() || '';
+              if (href && !files.some(f => f.url === href)) {
+                files.push({ name, size: '', url: href });
+              }
+            });
+
+            return files;
+          });
+
+          // Add download files to handouts
+          downloadFiles.forEach(f => {
+            if (f.name && !courseData.handouts.some(h => h.name === f.name)) {
+              courseData.handouts.push({
+                name: f.name,
+                url: f.url,
+                type: 'download',
+                lessonNumber: 0,
+                weekNumber: 0,
+                status: 'available',
+                duration: f.size,
+              });
+            }
+          });
+
+          console.log('[VULMS AllData] Download files found:', downloadFiles.length);
+        }
+      } catch (e) {
+        console.log('[VULMS AllData] Download files fetch failed:', e instanceof Error ? e.message : e);
+      }
+    }
+
+    // ─── If ALL data is empty, capture debug info ───
+    const allEmpty = courseData.handouts.length === 0 && courseData.videos.length === 0
+      && courseData.quizzes.length === 0 && courseData.assignments.length === 0
+      && courseData.gdbs.length === 0 && courseData.lessons.length === 0;
+
+    if (allEmpty) {
+      const debugInfo = await page.evaluate(() => {
+        return {
+          url: window.location.href,
+          title: document.title,
+          bodyTextPreview: (document.body.innerText || '').substring(0, 2000),
+          allAnchorIds: Array.from(document.querySelectorAll('a[id]')).map(a => ({
+            id: a.id,
+            text: a.textContent?.trim().substring(0, 60) || '',
+            href: a.getAttribute('href')?.substring(0, 80) || '',
+          })),
+          allDivIds: Array.from(document.querySelectorAll('div[id]')).map(d => d.id).filter(id => id),
+        };
+      });
+      console.log('[VULMS AllData] WARNING: All course data is EMPTY!');
+      console.log('[VULMS AllData] Debug - URL:', debugInfo.url, 'Title:', debugInfo.title);
+      console.log('[VULMS AllData] Debug - Anchor IDs:', JSON.stringify(debugInfo.allAnchorIds.slice(0, 20)));
+      console.log('[VULMS AllData] Debug - Body text:', debugInfo.bodyTextPreview.substring(0, 500));
     }
 
     await browser.close();
@@ -1154,16 +1263,15 @@ export async function downloadHandoutContent(
   const { browser, page } = await createBrowserPage(cookies);
 
   try {
-    // First navigate to dashboard, then we need to navigate to the course
-    // For lessons, we need to be on the CourseHome page first
     await page.goto(`${VULMS_BASE}/Home.aspx`, { waitUntil: 'networkidle2', timeout: 45000 });
 
-    // Check if this is a direct URL or an eventTarget
     if (lessonEventTarget.startsWith('http')) {
       await page.goto(lessonEventTarget, { waitUntil: 'networkidle2', timeout: 45000 });
     } else {
-      // It's an eventTarget - try postback from dashboard
       console.log('[VULMS Content] Opening lesson:', lessonEventTarget);
+      // Navigate to course first, then trigger lesson postback
+      // First, we need to be on a course page that has this lesson
+      // The lessonEventTarget is from the course home page's lesson links
       await page.evaluate((target) => {
         (window as any).__doPostBack(target, '');
       }, lessonEventTarget);
@@ -1176,7 +1284,21 @@ export async function downloadHandoutContent(
 
     // Extract content from the lesson page
     const content = await page.evaluate(() => {
-      // Try multiple content selectors for VULMS lesson page
+      // The lesson content is in an iframe on LessonViewer.aspx
+      // Try to get content from the content iframe
+      const contentIframe = document.querySelector('iframe[src*="Courses/"]') as HTMLIFrameElement;
+      if (contentIframe) {
+        try {
+          const iframeDoc = contentIframe.contentDocument || contentIframe.contentWindow?.document;
+          if (iframeDoc && iframeDoc.body) {
+            return iframeDoc.body.textContent?.trim() || '';
+          }
+        } catch {
+          // Cross-origin iframe - can't access
+        }
+      }
+
+      // Try multiple content selectors
       const selectors = [
         '#MainContent',
         '#divLessonContent',
@@ -1198,7 +1320,6 @@ export async function downloadHandoutContent(
 
       // Fallback: get main body text but exclude navigation
       const body = document.body.cloneNode(true) as HTMLElement;
-      // Remove nav, header, footer elements
       body.querySelectorAll('nav, header, footer, script, style, .m-header, .m-footer').forEach(el => el.remove());
       return body.textContent?.trim() || 'Content not available.';
     });
