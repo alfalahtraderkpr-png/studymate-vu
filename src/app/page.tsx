@@ -551,11 +551,21 @@ function SubjectView() {
   const loadVideoSummary = useAppStore((s) => s.loadVideoSummary);
 
   const [chatInput, setChatInput] = useState('');
-  const [activeTab, setActiveTab] = useState('handouts');
+  const [activeTab, setActiveTabInternal] = useState('handouts');
   const chatEndRef = useRef<HTMLDivElement>(null);
   const { toast } = useToast();
 
   const isDemo = studentId === 'DEMO-STUDENT';
+
+  // Load videos on demand when user clicks Videos tab
+  const loadVideosForSubject = useAppStore((s) => s.loadVideos);
+
+  const setActiveTab = useCallback((tab: string) => {
+    setActiveTabInternal(tab);
+    if (tab === 'videos' && selectedSubject && !isDemo && selectedSubject.videos.length === 0 && selectedSubject.id) {
+      loadVideosForSubject(selectedSubject.id);
+    }
+  }, [selectedSubject, isDemo, loadVideosForSubject]);
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });

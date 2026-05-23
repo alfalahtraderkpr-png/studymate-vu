@@ -125,6 +125,7 @@ interface AppState {
   loginDemo: () => Promise<void>;
   selectSubject: (subject: SubjectInfo) => void;
   loadCourseData: (subjectId: string) => Promise<void>;
+  loadVideos: (subjectId: string) => Promise<void>;
   loadHandout: (handoutUrl: string, handoutName: string) => Promise<void>;
   loadHandoutDemo: (subjectCode: string, handoutName: string) => Promise<void>;
   loadVideoSummary: (video: VideoLectureInfo) => Promise<void>;
@@ -635,11 +636,6 @@ export const useAppStore = create<AppState>((set, get) => ({
     const subject = subjects[subjectIndex];
     if (!subject || subject.courseDataLoaded) return;
 
-    // Find the eventTarget from original login data
-    // We stored the eventTarget in the login response subjects[i].url
-    // But in the store, we only have the subject data without the eventTarget
-    // We need to find it from the cookies/session
-
     set({ isLoading: true, loadingMessage: `Loading course data for ${subject.code}...` });
 
     try {
@@ -669,7 +665,7 @@ export const useAppStore = create<AppState>((set, get) => ({
           updatedSubjects[subjectIndex] = {
             ...updatedSubjects[subjectIndex],
             handouts: courseData.courseData.handouts || [],
-            videos: courseData.courseData.videos || [],
+            videos: courseData.courseData.videos || [], // Empty initially, loaded on demand
             quizzes: courseData.courseData.quizzes || [],
             assignments: courseData.courseData.assignments || [],
             gdbs: courseData.courseData.gdbs || [],
@@ -679,6 +675,59 @@ export const useAppStore = create<AppState>((set, get) => ({
             subjects: updatedSubjects,
             selectedSubject: updatedSubjects[subjectIndex],
             notifications: generateNotifications(updatedSubjects),
+          });
+        }
+      }
+    } catch {
+      // Skip failed
+    } finally {
+      set({ isLoading: false, loadingMessage: '' });
+    }
+  },
+
+  loadVideos: async (subjectId: string) => {
+    const { cookies, subjects } = get();
+    const subjectIndex = subjects.findIndex(s => s.id === subjectId);
+    if (subjectIndex === -1) return;
+
+    const subject = subjects[subjectIndex];
+    if (!subject) return;
+
+    // Skip if videos already loaded
+    if (subject.videos.length > 0) return;
+
+    set({ isLoading: true, loadingMessage: `Loading videos for ${subject.code} (this may take a minute)...` });
+
+    try {
+      const subjectsRes = await fetch('/api/vulms/subjects', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cookies }),
+      });
+
+      if (!subjectsRes.ok) throw new Error('Failed to fetch subjects');
+      const subjectsData = await subjectsRes.json();
+      const subjectData = (subjectsData.subjects || []).find(
+        (s: { code: string }) => s.code === subject.code
+      );
+
+      if (subjectData?.url) {
+        const videosRes = await fetch('/api/vulms/videos', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ cookies, courseEventTarget: subjectData.url }),
+        });
+        const videosData = await videosRes.json();
+
+        if (videosData.videos) {
+          const updatedSubjects = [...subjects];
+          updatedSubjects[subjectIndex] = {
+            ...updatedSubjects[subjectIndex],
+            videos: videosData.videos,
+          };
+          set({
+            subjects: updatedSubjects,
+            selectedSubject: updatedSubjects[subjectIndex],
           });
         }
       }

@@ -22,7 +22,7 @@ export async function POST(request: NextRequest) {
     const subjects = await getSubjects(cookies);
 
     // Get handouts for each subject
-    const subjectsWithHandouts = [];
+    const subjectsWithHandouts: Array<{ name: string; code: string; url: string; handouts: any[] }> = [];
     for (const subject of subjects) {
       try {
         const handouts = await getHandouts(cookies, subject.url);

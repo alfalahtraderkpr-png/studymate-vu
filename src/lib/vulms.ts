@@ -411,11 +411,11 @@ async function navigateToCourse(
     }
 
     // Wait for course page content to render
-    await new Promise(r => setTimeout(r, 3000));
+    await new Promise(r => setTimeout(r, 2000));
 
     // Wait specifically for lesson links to appear on course page
     try {
-      await page.waitForSelector('a[id*="lbtnViewLesson"]', { timeout: 10000 });
+      await page.waitForSelector('a[id*="lbtnViewLesson"]', { timeout: 8000 });
       console.log('[VULMS] Lesson links found on course page!');
     } catch {
       console.log('[VULMS] WARNING: No lesson links found on course page after navigation');
@@ -606,75 +606,10 @@ export async function getAllCourseData(
       currentUrl: currentCourseUrl,
     });
 
-    // ─── EXTRACT VIDEOS FROM LESSON PAGES ───
-    // YouTube videos are inside individual lesson pages (LessonViewer.aspx)
-    // We need to click into each lesson and check for YouTube iframes
-    if (courseData.lessons.length > 0 && courseData.videos.length === 0) {
-      console.log('[VULMS AllData] Extracting videos from lesson pages...');
-      const maxLessonsToCheck = Math.min(courseData.lessons.length, 45); // limit to avoid timeout
-
-      for (let i = 0; i < maxLessonsToCheck; i++) {
-        const lesson = courseData.lessons[i];
-        if (!lesson.eventTarget) continue;
-
-        try {
-          // Click the lesson link
-          await Promise.all([
-            page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 20000 }).catch(() => {}),
-            page.evaluate((target) => {
-              (window as any).__doPostBack(target, '');
-            }, lesson.eventTarget),
-          ]);
-
-          await new Promise(r => setTimeout(r, 2000));
-
-          // Check for YouTube iframe on the lesson page
-          const videoInfo = await page.evaluate(() => {
-            const iframe = document.querySelector('iframe[src*="youtube.com/embed/"]') as HTMLIFrameElement;
-            if (iframe) {
-              const src = iframe.getAttribute('src') || '';
-              const videoIdMatch = src.match(/youtube\.com\/embed\/([a-zA-Z0-9_-]+)/);
-              if (videoIdMatch) {
-                return `https://www.youtube.com/watch?v=${videoIdMatch[1]}`;
-              }
-            }
-            return null;
-          });
-
-          if (videoInfo) {
-            courseData.videos.push({
-              name: lesson.name,
-              youtubeUrl: videoInfo,
-              lessonNumber: String(lesson.lessonNumber),
-            });
-            console.log(`[VULMS AllData] Found video for lesson ${lesson.lessonNumber}: ${lesson.name}`);
-          }
-
-          // Go back to course page
-          await page.goBack({ waitUntil: 'networkidle2', timeout: 20000 }).catch(async () => {
-            // If goBack fails, navigate directly
-            await page.goto(`${VULMS_BASE}/CourseHome.aspx`, { waitUntil: 'networkidle2', timeout: 20000 }).catch(() => {});
-          });
-          await new Promise(r => setTimeout(r, 1500));
-
-          // Make sure we're back on the course page with lesson links
-          try {
-            await page.waitForSelector('a[id*="lbtnViewLesson"]', { timeout: 5000 });
-          } catch {
-            // If not, try navigating back to course page
-            console.log('[VULMS AllData] Lost course page context, re-navigating...');
-            break;
-          }
-        } catch (e) {
-          console.log(`[VULMS AllData] Failed to extract video from lesson ${lesson.lessonNumber}:`, e instanceof Error ? e.message : e);
-          // Try to get back to course page
-          await page.goto(`${VULMS_BASE}/CourseHome.aspx`, { waitUntil: 'networkidle2', timeout: 20000 }).catch(() => {});
-          await new Promise(r => setTimeout(r, 1500));
-        }
-      }
-
-      console.log(`[VULMS AllData] Extracted ${courseData.videos.length} videos from lesson pages`);
-    }
+    // ─── VIDEOS: NOT extracted during initial load (too slow! 45 lessons × 5s = ~4 min) ───
+    // Videos are extracted on-demand via getVideoLectures() when user clicks "Study"
+    // Each lesson has a YouTube iframe in LessonViewer.aspx
+    console.log('[VULMS AllData] Skipping video extraction for speed. Videos will be loaded on demand.')
 
     // ─── ENRICH WITH ACTIVITY PAGE DATA (dates, scores, etc.) ───
     if (subjectCode) {
@@ -1178,13 +1113,110 @@ export async function getHandouts(
   return data.handouts;
 }
 
-// ─── GET VIDEO LECTURES ──
+// ─── GET VIDEO LECTURES (on-demand, navigates into each lesson page) ──
+// This is SLOW (45 lessons × ~5s = ~4 min) so it's NOT called during initial load
+// Call this separately when user wants to see videos
 export async function getVideoLectures(
   cookies: Array<{ name: string; value: string; domain?: string; path?: string }>,
   courseEventTarget: string
 ) {
-  const data = await getAllCourseData(cookies, courseEventTarget);
-  return data.videos;
+  const { browser, page } = await navigateToCourse(cookies, courseEventTarget);
+
+  try {
+    // Get all lesson links from course page
+    const lessons = await page.evaluate(() => {
+      const results: Array<{ name: string; eventTarget: string; lessonNumber: number }> = [];
+      const seen = new Set<string>();
+      let count = 0;
+      document.querySelectorAll('a[id*="lbtnViewLesson"]').forEach((el) => {
+        const link = el as HTMLAnchorElement;
+        const text = link.getAttribute('title') || link.textContent?.trim().replace(/\s+/g, ' ') || '';
+        const href = link.getAttribute('href') || '';
+        const id = link.id || '';
+        if (!text || seen.has(id)) return;
+        seen.add(id);
+        count++;
+
+        let eventTarget = '';
+        const doPostBackMatch = href.match(/__doPostBack\('([^']+)'/);
+        const webFormMatch = href.match(/WebForm_PostBackOptions\("([^"]+)"/);
+        if (doPostBackMatch) eventTarget = doPostBackMatch[1];
+        else if (webFormMatch) eventTarget = webFormMatch[1];
+
+        if (eventTarget) {
+          results.push({ name: text, eventTarget, lessonNumber: count });
+        }
+      });
+      return results;
+    });
+
+    console.log('[VULMS Videos] Found', lessons.length, 'lessons, extracting YouTube links...');
+
+    const videos: VideoLectureInfo[] = [];
+    const maxLessons = Math.min(lessons.length, 45);
+
+    for (let i = 0; i < maxLessons; i++) {
+      const lesson = lessons[i];
+
+      try {
+        // Click into the lesson page
+        await Promise.all([
+          page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 20000 }).catch(() => {}),
+          page.evaluate((target) => {
+            (window as any).__doPostBack(target, '');
+          }, lesson.eventTarget),
+        ]);
+
+        await new Promise(r => setTimeout(r, 1500));
+
+        // Check for YouTube iframe
+        const videoUrl = await page.evaluate(() => {
+          const iframe = document.querySelector('iframe[src*="youtube.com/embed/"]') as HTMLIFrameElement;
+          if (iframe) {
+            const src = iframe.getAttribute('src') || '';
+            const m = src.match(/youtube\.com\/embed\/([a-zA-Z0-9_-]+)/);
+            if (m) return `https://www.youtube.com/watch?v=${m[1]}`;
+          }
+          return null;
+        });
+
+        if (videoUrl) {
+          videos.push({
+            name: lesson.name,
+            youtubeUrl: videoUrl,
+            lessonNumber: String(lesson.lessonNumber),
+          });
+          console.log(`[VULMS Videos] Lesson ${lesson.lessonNumber}: ${lesson.name} -> ${videoUrl.substring(0, 50)}`);
+        }
+
+        // Go back to course page
+        await page.goBack({ waitUntil: 'networkidle2', timeout: 15000 }).catch(async () => {
+          await page.goto(`${VULMS_BASE}/CourseHome.aspx`, { waitUntil: 'networkidle2', timeout: 15000 }).catch(() => {});
+        });
+        await new Promise(r => setTimeout(r, 1000));
+
+        // Verify we're back on course page
+        try {
+          await page.waitForSelector('a[id*="lbtnViewLesson"]', { timeout: 5000 });
+        } catch {
+          console.log('[VULMS Videos] Lost course page context, stopping video extraction');
+          break;
+        }
+      } catch (e) {
+        console.log(`[VULMS Videos] Failed lesson ${lesson.lessonNumber}:`, e instanceof Error ? e.message : e);
+        await page.goto(`${VULMS_BASE}/CourseHome.aspx`, { waitUntil: 'networkidle2', timeout: 15000 }).catch(() => {});
+        await new Promise(r => setTimeout(r, 1000));
+      }
+    }
+
+    console.log(`[VULMS Videos] Extracted ${videos.length} videos from ${maxLessons} lessons`);
+    await browser.close();
+    return videos;
+  } catch (error) {
+    await browser.close().catch(() => {});
+    console.error('[VULMS Videos] Error:', error instanceof Error ? error.message : error);
+    return [];
+  }
 }
 
 // ─── GET QUIZZES ──
