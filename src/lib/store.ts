@@ -576,7 +576,17 @@ export const useAppStore = create<AppState>((set, get) => ({
           });
           const courseData = await courseRes.json();
 
-          if (courseData.courseData) {
+          if (courseData.error) {
+            console.error(`[StudyMate] Course data error for ${(data.subjects[i] as {code: string}).code}:`, courseData.error);
+            // Still mark as loaded so we don't keep retrying
+            const { subjects } = get();
+            const updatedSubjects = [...subjects];
+            updatedSubjects[i] = {
+              ...updatedSubjects[i],
+              courseDataLoaded: true,
+            };
+            set({ subjects: updatedSubjects });
+          } else if (courseData.courseData) {
             const { subjects } = get();
             const updatedSubjects = [...subjects];
             updatedSubjects[i] = {

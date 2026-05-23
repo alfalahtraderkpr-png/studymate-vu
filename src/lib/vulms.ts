@@ -377,6 +377,7 @@ async function navigateToCourse(
   const { browser, page } = await createBrowserPage(cookies);
 
   try {
+    console.log('[VULMS] Loading Home.aspx...');
     await page.goto(`${VULMS_BASE}/Home.aspx`, { waitUntil: 'networkidle2', timeout: 45000 });
 
     const pageContent = await page.content();
@@ -385,26 +386,113 @@ async function navigateToCourse(
       throw new Error('Session expired. Please login again.');
     }
 
-    console.log('[VULMS] Navigating to course via eventTarget:', courseEventTarget);
+    console.log('[VULMS] Home loaded. Current URL:', page.url());
 
-    // ── APPROACH 1: Use __doPostBack with Promise.all for reliable navigation ──
-    try {
-      await Promise.all([
-        page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 }),
-        page.evaluate((target) => {
-          (window as any).__doPostBack(target, '');
-        }, courseEventTarget),
-      ]);
-    } catch (e) {
-      console.log('[VULMS] Promise.all postback failed, trying sequential approach...');
-      await page.evaluate((target) => {
-        (window as any).__doPostBack(target, '');
-      }, courseEventTarget);
-      await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 }).catch(() => {});
+    // ── STRATEGY 1: Click the actual link element ──
+    // This is more reliable than __doPostBack because it simulates real user interaction
+    let navigated = false;
+
+    // Try to find and click the actual <a> element for this course
+    console.log('[VULMS] Trying to find course link for eventTarget:', courseEventTarget);
+
+    // First try: find by matching the href attribute that contains the eventTarget
+    const linkFound = await page.evaluate((target) => {
+      const links = Array.from(document.querySelectorAll('a[id*="ibtnCourseHome"]'));
+      for (const link of links) {
+        const href = link.getAttribute('href') || '';
+        if (href.includes(target)) {
+          return { found: true, id: link.id, href: href.substring(0, 200) };
+        }
+      }
+      // Also try matching by ID pattern
+      return { found: false, id: '', href: '' };
+    }, courseEventTarget);
+
+    console.log('[VULMS] Link search result:', linkFound);
+
+    if (linkFound.found) {
+      // Use Promise.all to avoid race condition
+      console.log('[VULMS] Clicking course link with Promise.all...');
+      try {
+        await Promise.all([
+          page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 }),
+          page.click(`a[id="${linkFound.id}"]`),
+        ]);
+        navigated = true;
+        console.log('[VULMS] Click navigation succeeded. URL:', page.url());
+      } catch (e) {
+        console.log('[VULMS] Click navigation failed:', e instanceof Error ? e.message : e);
+      }
     }
 
-    // Wait for dynamic content
-    await new Promise(r => setTimeout(r, 2000));
+    // ── STRATEGY 2: Use __doPostBack with Promise.all ──
+    if (!navigated) {
+      console.log('[VULMS] Trying __doPostBack approach...');
+      try {
+        // Check if __doPostBack exists on the page
+        const hasDoPostBack = await page.evaluate(() => typeof (window as any).__doPostBack === 'function');
+        console.log('[VULMS] __doPostBack exists:', hasDoPostBack);
+
+        if (hasDoPostBack) {
+          // Use Promise.all to avoid race condition - waitForNavigation must be set up BEFORE triggering navigation
+          await Promise.all([
+            page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 }),
+            page.evaluate((target) => {
+              (window as any).__doPostBack(target, '');
+            }, courseEventTarget),
+          ]);
+          navigated = true;
+          console.log('[VULMS] __doPostBack navigation succeeded. URL:', page.url());
+        }
+      } catch (e) {
+        console.log('[VULMS] __doPostBack navigation failed:', e instanceof Error ? e.message : e);
+      }
+    }
+
+    // ── STRATEGY 3: If still not navigated, try ASP.NET form submission ──
+    if (!navigated) {
+      console.log('[VULMS] Trying form submission approach...');
+      try {
+        await Promise.all([
+          page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 }),
+          page.evaluate((target) => {
+            const theForm = document.forms[0] || document.getElementById('aspnetForm') || document.getElementById('ctl00');
+            if (theForm) {
+              const hiddenInput = document.createElement('input');
+              hiddenInput.type = 'hidden';
+              hiddenInput.name = '__EVENTTARGET';
+              hiddenInput.value = target;
+              theForm.appendChild(hiddenInput);
+              (theForm as HTMLFormElement).submit();
+            }
+          }, courseEventTarget),
+        ]);
+        navigated = true;
+        console.log('[VULMS] Form submit navigation succeeded. URL:', page.url());
+      } catch (e) {
+        console.log('[VULMS] Form submit navigation failed:', e instanceof Error ? e.message : e);
+      }
+    }
+
+    // Wait for dynamic content to load
+    await new Promise(r => setTimeout(r, 3000));
+
+    // Verify we actually navigated to a course page
+    const finalUrl = page.url();
+    console.log('[VULMS] Final URL after navigation:', finalUrl);
+
+    // Check if we're still on Home.aspx (navigation failed)
+    if (finalUrl.toLowerCase().includes('home.aspx') && !finalUrl.toLowerCase().includes('coursehome.aspx')) {
+      console.log('[VULMS] WARNING: Still on Home.aspx - navigation may have failed');
+      // Check if the page content changed (some VULMS courses load via AJAX without URL change)
+      const pageText = await page.evaluate(() => document.body.innerText.substring(0, 500));
+      console.log('[VULMS] Page content preview:', pageText.substring(0, 200));
+
+      // If we see lesson content, we might be on the right page even if URL didn't change
+      if (pageText.toLowerCase().includes('lesson') || pageText.toLowerCase().includes('lecture') || pageText.toLowerCase().includes('week')) {
+        console.log('[VULMS] Content suggests we might be on course page despite URL');
+      }
+    }
 
     const urlAfterPostback = page.url();
     console.log('[VULMS] After __doPostBack, URL:', urlAfterPostback);
@@ -471,8 +559,8 @@ async function navigateToCourse(
       console.log('[VULMS] WARNING: No lesson links found on course page after navigation');
     }
 
-    const finalUrl = page.url();
-    console.log('[VULMS] Final course page URL:', finalUrl);
+    const coursePageUrl = page.url();
+    console.log('[VULMS] Final course page URL:', coursePageUrl);
 
     return { browser, page };
   } catch (error) {
@@ -494,6 +582,22 @@ export async function getAllCourseData(
   try {
     const currentCourseUrl = page.url();
     console.log('[VULMS AllData] Scraping all course data from:', currentCourseUrl);
+
+    // ─── DEBUG: Log what page we're actually on ───
+    const debugInfo = await page.evaluate(() => ({
+      url: window.location.href,
+      title: document.title,
+      allLinkIds: Array.from(document.querySelectorAll('a[id]')).map(a => a.id).filter(id =>
+        id.includes('lbtn') || id.includes('ibtn') || id.includes('Course') || id.includes('Lesson')
+      ),
+      bodyTextPreview: document.body.innerText.substring(0, 1000),
+    }));
+    console.log('[VULMS AllData] DEBUG Page info:', {
+      url: debugInfo.url,
+      title: debugInfo.title,
+      relevantLinkIds: debugInfo.allLinkIds.slice(0, 30),
+      textPreview: debugInfo.bodyTextPreview.substring(0, 300),
+    });
 
     // ─── SCRAPE LESSONS & ACTIVITIES FROM COURSE HOME ───
     const courseData = await page.evaluate(() => {
@@ -643,6 +747,162 @@ export async function getAllCourseData(
           });
         }
       });
+
+      // ── CHECK FOR YOUTUBE/VIDEO LINKS ON COURSE HOME ──
+      const ytIframes = document.querySelectorAll('iframe[src*="youtube.com"], iframe[src*="youtu.be"]');
+      ytIframes.forEach((iframe, index) => {
+        const src = iframe.getAttribute('src') || '';
+        if (src && !seen.has('yt:' + src)) {
+          seen.add('yt:' + src);
+          const videoIdMatch = src.match(/youtube\.com\/embed\/([a-zA-Z0-9_-]+)/);
+          const ytUrl = videoIdMatch ? `https://www.youtube.com/watch?v=${videoIdMatch[1]}` : src;
+          result.videos.push({
+            name: `Video Lecture ${index + 1}`,
+            youtubeUrl: ytUrl,
+            lessonNumber: String(index + 1),
+          });
+        }
+      });
+
+      const ytLinks = document.querySelectorAll('a[href*="youtube.com"], a[href*="youtu.be"]');
+      ytLinks.forEach((el, index) => {
+        const link = el as HTMLAnchorElement;
+        const href = link.href || '';
+        const text = link.textContent?.trim().replace(/\s+/g, ' ') || `Video Lecture ${index + 1}`;
+        if (!href || seen.has('yt:' + href)) return;
+        seen.add('yt:' + href);
+
+        const videoIdMatch = href.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/)([a-zA-Z0-9_-]+)/);
+        const ytUrl = videoIdMatch ? `https://www.youtube.com/watch?v=${videoIdMatch[1]}` : href;
+
+        result.videos.push({
+          name: text,
+          youtubeUrl: ytUrl,
+          lessonNumber: String(index + 1),
+        });
+      });
+
+      // ── FALLBACK: If no structured elements found, try generic parsing ──
+      if (result.handouts.length === 0 && result.quizzes.length === 0 && result.assignments.length === 0 && result.gdbs.length === 0) {
+        // Try to find ANY links with postback that might be lessons/activities
+        const allPostbackLinks = document.querySelectorAll('a[href*="__doPostBack"], a[href*="WebForm_DoPostBack"]');
+        allPostbackLinks.forEach((el) => {
+          const link = el as HTMLAnchorElement;
+          const text = link.textContent?.trim().replace(/\s+/g, ' ') || '';
+          const href = link.getAttribute('href') || '';
+          const id = link.id || '';
+
+          if (!text || seen.has('fallback:' + id)) return;
+          seen.add('fallback:' + id);
+
+          let eventTarget = '';
+          const doPostBackMatch = href.match(/__doPostBack\('([^']+)'/);
+          const webFormMatch = href.match(/WebForm_PostBackOptions\("([^"]+)"/);
+          if (doPostBackMatch) eventTarget = doPostBackMatch[1];
+          else if (webFormMatch) eventTarget = webFormMatch[1];
+
+          if (!eventTarget) return;
+
+          const lowerText = text.toLowerCase();
+
+          if (lowerText.includes('lesson') || lowerText.includes('lecture') || id.toLowerCase().includes('lesson') || id.toLowerCase().includes('lbtnview')) {
+            result.handouts.push({
+              name: text,
+              url: eventTarget,
+              type: 'lesson',
+              lessonNumber: result.handouts.length + 1,
+              weekNumber: 0,
+              status: 'open',
+              duration: '',
+            });
+          } else if (lowerText.includes('quiz') || id.toLowerCase().includes('quiz')) {
+            result.quizzes.push({
+              name: text,
+              openDate: '',
+              closeDate: '',
+              status: 'not_started',
+              score: '',
+              totalMarks: '',
+              eventTarget,
+              weekNumber: 0,
+            });
+          } else if (lowerText.includes('assignment') || lowerText.includes('assign') || id.toLowerCase().includes('assignment')) {
+            result.assignments.push({
+              name: text,
+              dueDate: '',
+              status: 'not_submitted',
+              score: '',
+              totalMarks: '',
+              eventTarget,
+              weekNumber: 0,
+            });
+          } else if (lowerText.includes('gdb') || lowerText.includes('graded discussion') || id.toLowerCase().includes('gdb')) {
+            result.gdbs.push({
+              name: text,
+              openDate: '',
+              closeDate: '',
+              status: 'not_posted',
+              totalMarks: '',
+              submitStatus: '',
+              eventTarget,
+            });
+          }
+        });
+      }
+
+      // ── LAST RESORT: Parse body text for activity keywords ──
+      if (result.handouts.length === 0 && result.quizzes.length === 0 && result.assignments.length === 0 && result.gdbs.length === 0) {
+        const bodyText = document.body.innerText || '';
+        const lines = bodyText.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+
+        for (const line of lines) {
+          if (line.match(/quiz\s*#?\s*\d+/i)) {
+            result.quizzes.push({
+              name: line.match(/quiz\s*#?\s*\d+/i)![0],
+              openDate: '',
+              closeDate: '',
+              status: 'not_started',
+              score: '',
+              totalMarks: '',
+              eventTarget: '',
+              weekNumber: 0,
+            });
+          }
+          if (line.match(/assignment\s*#?\s*\d+/i)) {
+            result.assignments.push({
+              name: line.match(/assignment\s*#?\s*\d+/i)![0],
+              dueDate: '',
+              status: 'not_submitted',
+              score: '',
+              totalMarks: '',
+              eventTarget: '',
+              weekNumber: 0,
+            });
+          }
+          if (line.match(/gdb\s*#?\s*\d+/i)) {
+            result.gdbs.push({
+              name: line.match(/gdb\s*#?\s*\d+/i)![0],
+              openDate: '',
+              closeDate: '',
+              status: 'not_posted',
+              totalMarks: '',
+              submitStatus: '',
+              eventTarget: '',
+            });
+          }
+          if (line.match(/lesson\s*#?\s*\d+|lecture\s*#?\s*\d+/i)) {
+            result.handouts.push({
+              name: line.match(/(?:lesson|lecture)\s*#?\s*\d+/i)![0],
+              url: '',
+              type: 'lesson',
+              lessonNumber: result.handouts.length + 1,
+              weekNumber: 0,
+              status: 'open',
+              duration: '',
+            });
+          }
+        }
+      }
 
       return result;
     });
@@ -1152,15 +1412,11 @@ export async function getAllCourseData(
     return courseData;
   } catch (error) {
     await browser.close().catch(() => {});
-    console.error('[VULMS AllData] Error:', error instanceof Error ? error.message : error);
-    return {
-      handouts: [],
-      videos: [],
-      quizzes: [],
-      assignments: [],
-      gdbs: [],
-      lessons: [],
-    };
+    const errMsg = error instanceof Error ? error.message : String(error);
+    console.error('[VULMS AllData] FATAL Error:', errMsg);
+    // THROW the error instead of silently returning empty arrays
+    // This way the API route can return a proper error to the frontend
+    throw new Error(`Failed to fetch course data: ${errMsg}`);
   }
 }
 
