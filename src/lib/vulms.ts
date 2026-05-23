@@ -121,44 +121,50 @@ function getChromePath(): string {
   if (process.env.PUPPETEER_EXECUTABLE_PATH) return process.env.PUPPETEER_EXECUTABLE_PATH;
   if (process.env.CHROME_PATH) return process.env.CHROME_PATH;
 
-  // Try Puppeteer's bundled Chrome locations
-  const path = require('path');
-  const fs = require('fs');
+  // Try to find Puppeteer's Chrome at runtime
+  try {
+    const path = require('path');
+    const fs = require('fs');
+    const os = require('os');
 
-  // Puppeteer 24.x stores Chrome in node_modules/puppeteer-core or .cache/puppeteer
-  const possiblePaths = [
-    path.join(process.cwd(), 'node_modules', 'puppeteer', '.local-chromium', 'linux-*', 'chrome-linux64', 'chrome'),
-    path.join(require('os').homedir(), '.cache', 'puppeteer', 'chrome', 'linux-*', 'chrome-linux64', 'chrome'),
-    '/usr/bin/chromium',
-    '/usr/bin/chromium-browser',
-    '/usr/bin/google-chrome',
-  ];
+    const possiblePaths = [
+      // Docker standalone build: Chrome copied to puppeteer-chrome dir
+      path.join(process.cwd(), '.next', 'standalone', 'puppeteer-chrome', 'chrome'),
+      path.join(process.cwd(), 'puppeteer-chrome', 'chrome'),
+      // Puppeteer cache in home directory
+      path.join(os.homedir(), '.cache', 'puppeteer', 'chrome'),
+      // System Chromium
+      '/usr/bin/chromium',
+      '/usr/bin/chromium-browser',
+      '/usr/bin/google-chrome',
+    ];
 
-  for (const p of possiblePaths) {
-    try {
-      // Handle glob patterns
-      if (p.includes('*')) {
-        const dir = path.dirname(p);
-        const base = path.basename(p);
-        const parentDir = path.dirname(dir);
-        if (fs.existsSync(parentDir)) {
-          const entries = fs.readdirSync(parentDir).sort().reverse(); // Latest version first
+    for (const p of possiblePaths) {
+      try {
+        if (fs.existsSync(p)) {
+          console.log('[VULMS] Found Chrome at:', p);
+          return p;
+        }
+        // Handle directories that contain versioned subdirectories
+        if (p.endsWith('/chrome') && fs.existsSync(path.dirname(p))) {
+          const parentDir = path.dirname(p);
+          const entries = fs.readdirSync(parentDir).sort().reverse();
           for (const entry of entries) {
-            const candidate = path.join(parentDir, entry, path.basename(path.dirname(p)), base);
-            if (fs.existsSync(candidate)) {
-              console.log('[VULMS] Found Chrome at:', candidate);
-              return candidate;
+            if (entry.startsWith('linux-')) {
+              const candidate = path.join(parentDir, entry, 'chrome-linux64', 'chrome');
+              if (fs.existsSync(candidate)) {
+                console.log('[VULMS] Found Chrome at:', candidate);
+                return candidate;
+              }
             }
           }
         }
-      } else if (fs.existsSync(p)) {
-        console.log('[VULMS] Found Chrome at:', p);
-        return p;
-      }
-    } catch { /* ignore */ }
-  }
+      } catch { /* ignore */ }
+    }
+  } catch { /* ignore */ }
 
-  // Let Puppeteer find its own Chrome (default behavior)
+  // Return empty string to let Puppeteer find its own Chrome (default behavior)
+  console.log('[VULMS] No Chrome found at known paths, letting Puppeteer find it');
   return '';
 }
 
